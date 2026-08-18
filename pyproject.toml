@@ -1,0 +1,7 @@
+[tool.pytest.ini_options]
+# Cho phép chạy `pytest` từ bất kỳ thư mục nào trong repo mà vẫn import được
+# gói `aic`. Không có dòng này thì người clone về, mở IDE, bấm chạy test từ
+# thư mục khác là gãy import — loại lỗi ăn mất một giờ mà không học được gì.
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-ra"
