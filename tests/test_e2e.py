@@ -149,3 +149,48 @@ def test_03_review_step_is_honoured(tmp_path):
 
     assert len(rows) == 5, "người duyệt giữ 5 ứng viên, file nộp phải có 5 dòng"
     assert rows[0][-1] == "Hy Lạp", "câu trả lời người dùng nhập bị mất"
+
+
+def test_04_iterative_retrieve_logic():
+    """Kiểm tra iterative_retrieve xử lý 'not_matched' và 'unsure' đúng logic."""
+    from aic.pipeline import iterative_retrieve
+    
+    # 1. verify_fn mô phỏng: 
+    # Lấy các candidate thật từ dummy retriever trước để biết video_id nào sẽ xuất hiện
+    initial_cands = _fuse_minimal([dummy.search(QUERY, k=20)])
+    
+    # - "not_matched" cho một video cụ thể để loại nó ở vòng sau
+    # - "unsure" cho một video khác để nó vẫn nằm trong kết quả nhưng xếp sau
+    excluded_vid = initial_cands[0].video_id  # hạng 1 sẽ bị loại
+    unsure_vid = initial_cands[1].video_id    # hạng 2 sẽ thành unsure
+    
+    def mock_verify(cand):
+        if cand.video_id == excluded_vid:
+            return "not_matched"
+        if cand.video_id == unsure_vid:
+            return "unsure"
+        return "matched"
+        
+    candidates = iterative_retrieve(
+        QUERY, 
+        [dummy], 
+        _fuse_minimal, 
+        verify_fn=mock_verify,
+        max_rounds=2,
+        limit=1000
+    )
+    
+    video_ids = [c.video_id for c in candidates]
+    
+    # excluded_vid phải hoàn toàn biến mất
+    assert excluded_vid not in video_ids, f"Video {excluded_vid} phải bị loại khỏi kết quả"
+    
+    # unsure_vid vẫn phải tồn tại, nhưng nằm ở phần sau (nhóm unsure xếp sau matched)
+    assert unsure_vid in video_ids, f"Video {unsure_vid} (unsure) vẫn phải nằm trong kết quả"
+    
+    # Kiểm tra thứ tự: matched đứng trước unsure
+    # cand cuối cùng hoặc gần cuối sẽ là unsure (nếu có đủ kết quả)
+    unsure_indices = [i for i, c in enumerate(candidates) if c.video_id == unsure_vid]
+    if unsure_indices:
+        # Nhóm unsure phải nằm sau ít nhất một matched candidate
+        assert unsure_indices[0] > 0, "unsure candidate phải xếp sau matched candidate"
