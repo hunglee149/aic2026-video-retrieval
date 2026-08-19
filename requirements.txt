@@ -1,1 +1,7 @@
 pytest>=8.0
+numpy>=1.24
+faiss-cpu>=1.7.4
+open-clip-torch>=2.24
+transformers>=4.40
+torch>=2.1
+google-genai>=1.0
