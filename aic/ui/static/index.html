@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>AIC 2026 — Video Retrieval</title>
+  <meta name="description" content="Hệ thống tìm kiếm sự kiện trong video cho AI Challenge HCMC 2026"/>
+  <link rel="stylesheet" href="/static/style.css"/>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>"/>
+</head>
+<body>
+
+<div id="app">
+  <!-- ================================================================
+       TOPBAR
+       ================================================================ -->
+  <header id="topbar">
+    <div class="logo">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="url(#lg1)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <defs><linearGradient id="lg1" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#9F67FF"/><stop offset="100%" stop-color="#06B6D4"/></linearGradient></defs>
+        <polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+      </svg>
+      AIC 2026
+    </div>
+
+    <nav class="nav-tabs">
+      <button class="nav-tab active" id="tab-search" onclick="switchView('search')">🔍 Tìm kiếm</button>
+      <button class="nav-tab" id="tab-iterative" onclick="switchView('iterative')">🔄 Iterative</button>
+      <button class="nav-tab" id="tab-export" onclick="switchView('export')">📤 Export</button>
+    </nav>
+
+    <div class="topbar-spacer"></div>
+
+    <div class="status-pill" id="status-pill">
+      <div class="status-dot" id="status-dot"></div>
+      <span id="status-text">Đang kết nối...</span>
+    </div>
+  </header>
+
+  <!-- ================================================================
+       CONTENT
+       ================================================================ -->
+  <main id="content">
+
+    <!-- ============================================================
+         VIEW 1: SEARCH
+         ============================================================ -->
+    <div class="view active" id="view-search">
+
+      <!-- SIDEBAR -->
+      <aside id="sidebar">
+        <div class="sidebar-section">
+          <label class="label" for="query-input">Câu hỏi (Tiếng Việt)</label>
+          <textarea id="query-input" rows="4"
+            placeholder="Nhập mô tả cảnh cần tìm...&#10;Ví dụ: Người phụ nữ mặc áo đỏ đang đi dạo trong công viên lúc hoàng hôn"></textarea>
+        </div>
+
+        <div class="sidebar-section">
+          <span class="label">Loại task</span>
+          <div class="task-pills">
+            <button class="task-pill active" id="pill-kis"   onclick="selectTask('kis')">KIS</button>
+            <button class="task-pill"        id="pill-qa"    onclick="selectTask('qa')">Q&amp;A</button>
+            <button class="task-pill"        id="pill-trake" onclick="selectTask('trake')">TRAKE</button>
+          </div>
+        </div>
+
+        <div class="sidebar-section">
+          <div class="translate-row">
+            <label class="label" style="flex:1" for="translated-text">Bản dịch (EN)</label>
+            <button class="btn-translate" onclick="doTranslate()" id="btn-translate">
+              ⟳ Dịch
+            </button>
+          </div>
+          <textarea id="translated-text" rows="3"
+            placeholder="Auto-translate hoặc tự nhập..."></textarea>
+        </div>
+
+        <div class="sidebar-section">
+          <label class="label" for="query-id-input">Query ID</label>
+          <input type="text" id="query-id-input" value="pack1_q1_kis" placeholder="pack1_q1_kis"/>
+        </div>
+
+        <div class="sidebar-section" id="n-events-section" style="display:none">
+          <label class="label" for="n-events-input">Số events (TRAKE)</label>
+          <input type="number" id="n-events-input" value="3" min="1" max="20"/>
+        </div>
+
+        <div class="sidebar-section">
+          <button class="btn btn-primary" id="btn-search" onclick="doSearch()">
+            <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24">
+              <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+            Tìm kiếm
+          </button>
+        </div>
+
+        <div class="sidebar-section">
+          <div class="slider-row">
+            <span class="slider-label">Top-K:</span>
+            <input type="range" id="topk-slider" min="10" max="100" step="10" value="100"
+              oninput="document.getElementById('topk-val').textContent=this.value"/>
+            <span class="slider-val" id="topk-val">100</span>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="stats-block">
+          <div class="stats-number" id="stat-keyframes">—</div>
+          <div class="stats-desc">keyframes indexed</div>
+        </div>
+      </aside>
+
+      <!-- CENTER: Results -->
+      <section id="results-panel">
+        <div class="results-header">
+          <span class="results-title">Kết quả tìm kiếm</span>
+          <span class="badge badge-purple" id="results-count">0 candidates</span>
+          <span class="badge badge-gray" id="results-task-badge">KIS</span>
+          <div class="results-header-spacer"></div>
+          <div class="view-toggle">
+            <button class="view-toggle-btn active" id="btn-grid-view" onclick="setGridMode(true)" title="Grid view">
+              <svg width="14" height="14" fill="currentColor" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+            </button>
+            <button class="view-toggle-btn" id="btn-list-view" onclick="setGridMode(false)" title="List view">
+              <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div id="candidates-grid">
+          <div class="empty-state">
+            <svg width="56" height="56" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+              <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+            <p>Nhập câu hỏi và nhấn <strong>Tìm kiếm</strong> để xem kết quả</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- RIGHT: Detail panel -->
+      <aside id="detail-panel">
+        <div class="detail-header">
+          <span class="detail-title">Chi tiết lựa chọn</span>
+          <span class="badge badge-gray" id="detail-rank-badge">—</span>
+        </div>
+        <div class="detail-body">
+          <!-- Preview -->
+          <div id="preview-img-wrap">
+            <div class="preview-placeholder" id="preview-placeholder">
+              <svg width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" style="opacity:.3">
+                <polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+              </svg>
+              <span>Chọn một candidate</span>
+            </div>
+            <img id="preview-img" src="" alt="" style="display:none"/>
+          </div>
+
+          <!-- Scores -->
+          <div class="detail-section" id="detail-scores-section" style="display:none">
+            <div class="detail-section-title">Điểm số</div>
+            <div id="detail-scores-body"></div>
+          </div>
+
+          <!-- Evidence -->
+          <div class="detail-section" id="detail-evidence-section" style="display:none">
+            <div class="detail-section-title">Evidence</div>
+            <div class="evidence-text" id="detail-evidence-text"></div>
+          </div>
+
+          <!-- Frame picker -->
+          <div class="detail-section">
+            <div class="detail-section-title">Chọn frame</div>
+            <div class="frame-picker-row">
+              <input type="number" id="frame-input" placeholder="Frame index" min="0"/>
+            </div>
+          </div>
+
+          <!-- Answer (Q&A only) -->
+          <div class="detail-section" id="answer-section" style="display:none">
+            <div class="detail-section-title">Câu trả lời (Q&amp;A)</div>
+            <textarea id="answer-input" placeholder="Nhập câu trả lời..."></textarea>
+          </div>
+
+          <!-- Confirm button -->
+          <div class="detail-section">
+            <button class="btn btn-primary btn-sm" id="btn-confirm-selection" onclick="confirmSelection()" disabled>
+              ✓ Xác nhận lựa chọn
+            </button>
+          </div>
+
+          <!-- Selections list -->
+          <div class="detail-section">
+            <div class="detail-section-title">Đã xác nhận (<span id="sel-count">0</span>)</div>
+            <div class="selections-list" id="selections-list">
+              <div style="color:var(--text-muted);font-size:12px;text-align:center;padding:12px">
+                Chưa có lựa chọn nào
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="detail-footer">
+          <button class="btn btn-green" onclick="switchView('export')">
+            📤 Xem &amp; Export
+          </button>
+        </div>
+      </aside>
+    </div><!-- /view-search -->
+
+    <!-- ============================================================
+         VIEW 2: ITERATIVE
+         ============================================================ -->
+    <div class="view" id="view-iterative">
+
+      <div id="iter-header">
+        <div style="display:flex;align-items:center;gap:16px">
+          <span class="iter-title">🔄 Iterative Retrieval</span>
+          <span class="badge badge-purple" id="iter-round-badge">Round 0/3</span>
+        </div>
+
+        <div class="round-progress" id="round-progress">
+          <!-- Filled by JS -->
+        </div>
+
+        <div class="iter-stats">
+          <span class="badge badge-green"><span id="iter-matched-count">0</span> Matched</span>
+          <span class="badge badge-amber"><span id="iter-unsure-count">0</span> Unsure</span>
+          <span class="badge badge-red"><span id="iter-excluded-count">0</span> Excluded</span>
+          <span class="badge badge-gray" id="iter-status-badge">Chưa bắt đầu</span>
+        </div>
+      </div>
+
+      <div id="iter-main">
+        <!-- Left: Candidate viewer -->
+        <div id="iter-candidate-view">
+          <div id="iter-preview">
+            <div class="preview-placeholder" id="iter-preview-placeholder">
+              <svg width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" style="opacity:.25">
+                <polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+              </svg>
+              <span>Nhấn "Bắt đầu" để tìm kiếm vòng lặp</span>
+            </div>
+            <img id="iter-preview-img" src="" alt="" style="display:none;width:100%;height:100%;object-fit:cover"/>
+          </div>
+
+          <div class="iter-meta">
+            <div class="iter-meta-card">
+              <div class="iter-meta-label">Video ID</div>
+              <div class="iter-meta-val" id="iter-video-id">—</div>
+            </div>
+            <div class="iter-meta-card">
+              <div class="iter-meta-label">Frame</div>
+              <div class="iter-meta-val" id="iter-frame">—</div>
+            </div>
+            <div class="iter-meta-card iter-scores">
+              <div class="iter-meta-label">Điểm số</div>
+              <div class="score-grid" id="iter-score-grid">
+                <div class="score-cell"><div class="score-k">CLIP</div><div class="score-v" id="sc-clip">—</div></div>
+                <div class="score-cell"><div class="score-k">SigLIP</div><div class="score-v" id="sc-siglip">—</div></div>
+                <div class="score-cell"><div class="score-k">Fused</div><div class="score-v" id="sc-fused">—</div></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="verdict-big-row" id="iter-verdict-row">
+            <button class="verdict-big-btn vb-matched" onclick="iterVerdict('matched')" id="btn-vb-matched">
+              ✓ MATCHED
+            </button>
+            <button class="verdict-big-btn vb-not" onclick="iterVerdict('not_matched')" id="btn-vb-not">
+              ✗ NOT MATCHED
+            </button>
+            <button class="verdict-big-btn vb-unsure" onclick="iterVerdict('unsure')" id="btn-vb-unsure">
+              ? UNSURE
+            </button>
+          </div>
+        </div>
+
+        <!-- Right: Results sidebar -->
+        <div id="iter-results-sidebar">
+          <div class="iter-results-section" style="flex:1;overflow:hidden;display:flex;flex-direction:column">
+            <div class="iter-results-header">
+              <span>✅ Matched</span>
+              <span class="badge badge-green" id="iter-matched-badge">0</span>
+            </div>
+            <div class="iter-results-body" id="iter-matched-list">
+              <div style="padding:16px;color:var(--text-muted);font-size:12px;text-align:center">Chưa có</div>
+            </div>
+          </div>
+
+          <div class="iter-results-section" style="flex:1;overflow:hidden;display:flex;flex-direction:column">
+            <div class="iter-results-header">
+              <span>❓ Unsure</span>
+              <span class="badge badge-amber" id="iter-unsure-badge">0</span>
+            </div>
+            <div class="iter-results-body" id="iter-unsure-list">
+              <div style="padding:16px;color:var(--text-muted);font-size:12px;text-align:center">Chưa có</div>
+            </div>
+          </div>
+
+          <div class="iter-results-section">
+            <div class="iter-results-header" style="cursor:default">
+              <span>🚫 Excluded</span>
+              <span class="badge badge-red" id="iter-excluded-badge">0</span>
+            </div>
+          </div>
+
+          <div class="iter-actions">
+            <button class="btn btn-primary" id="btn-iter-start" onclick="iterStart()">
+              ▶ Bắt đầu
+            </button>
+            <button class="btn btn-secondary" id="btn-iter-finish" onclick="iterFinish()" disabled>
+              ✓ Kết thúc &amp; Lưu kết quả
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div id="iter-nav-bar">
+        <button class="btn btn-secondary btn-sm" onclick="iterNav(-1)" id="btn-iter-prev" disabled>← Prev</button>
+        <button class="btn btn-secondary btn-sm" onclick="iterNav(1)"  id="btn-iter-next" disabled>Next →</button>
+        <button class="btn btn-secondary btn-sm" onclick="iterNav(0)"  id="btn-iter-skip" disabled>Bỏ qua</button>
+        <div class="iter-nav-spacer"></div>
+        <div class="shortcut-hints">
+          <span><kbd>M</kbd>Matched</span>
+          <span><kbd>N</kbd>Not matched</span>
+          <span><kbd>U</kbd>Unsure</span>
+          <span><kbd>←</kbd><kbd>→</kbd>Điều hướng</span>
+        </div>
+      </div>
+    </div><!-- /view-iterative -->
+
+    <!-- ============================================================
+         VIEW 3: EXPORT
+         ============================================================ -->
+    <div class="view" id="view-export">
+      <div class="export-grid">
+        <!-- Left: Summary -->
+        <div class="export-card">
+          <div class="export-card-header">
+            <span>📋</span>
+            <h2>Tóm tắt kết quả</h2>
+            <div class="topbar-spacer"></div>
+            <span class="badge badge-gray" id="export-query-count">0 queries</span>
+          </div>
+          <div class="export-card-body">
+            <div id="export-alert"></div>
+            <table class="summary-table" id="export-table">
+              <thead>
+                <tr>
+                  <th>Query ID</th>
+                  <th>Task</th>
+                  <th>Video</th>
+                  <th>Frames</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="export-tbody">
+                <tr>
+                  <td colspan="5" style="text-align:center;color:var(--text-muted);padding:32px">
+                    Chưa có kết quả. Hãy tìm kiếm và xác nhận lựa chọn trước.
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Right: Export panel -->
+        <div style="display:flex;flex-direction:column;gap:16px">
+          <!-- Query ID config -->
+          <div class="export-card">
+            <div class="export-card-header">
+              <span>⚙️</span>
+              <h2>Cấu hình</h2>
+            </div>
+            <div class="export-card-body" style="display:flex;flex-direction:column;gap:12px">
+              <div>
+                <label class="label" for="export-query-id">Query ID</label>
+                <input type="text" id="export-query-id" placeholder="pack1_q1_kis" style="margin-top:6px"/>
+              </div>
+            </div>
+          </div>
+
+          <!-- CSV Preview -->
+          <div class="export-card">
+            <div class="export-card-header">
+              <span>👁️</span>
+              <h2>Preview CSV</h2>
+              <div class="topbar-spacer"></div>
+              <button class="btn btn-secondary btn-sm" onclick="refreshPreview()">↻ Refresh</button>
+            </div>
+            <div class="export-card-body">
+              <pre class="code-preview" id="csv-preview">— chưa có dữ liệu —</pre>
+            </div>
+          </div>
+
+          <!-- Download -->
+          <div class="export-card">
+            <div class="export-card-header">
+              <span>📦</span>
+              <h2>Xuất file nộp BTC</h2>
+            </div>
+            <div class="export-card-body" style="display:flex;flex-direction:column;gap:12px">
+              <button class="btn btn-green btn-lg" onclick="doExport()" id="btn-export">
+                📥 Tải xuống submission.zip
+              </button>
+              <div style="font-size:12px;color:var(--text-muted);text-align:center" id="export-hint">
+                Xác nhận ít nhất 1 lựa chọn trước khi export
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div><!-- /view-export -->
+
+  </main>
+</div><!-- /app -->
+
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<script src="/static/main.js"></script>
+</body>
+</html>

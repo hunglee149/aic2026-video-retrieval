@@ -65,6 +65,11 @@ pip install -r requirements.txt
 pytest
 ```
 
+Chạy UI
+```bash
+python -m uvicorn aic.ui.app:app --reload --port 8000
+```
+
 ## Viết tài liệu
 
 Mỗi người một file trong `docs/`: phần này làm gì, nhận
