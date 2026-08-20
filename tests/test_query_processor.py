@@ -86,3 +86,37 @@ class TestTranslateQuery:
 
         result = translate_query(q, translate_fn=failing_fn)
         assert result.text_en == "tiếng Việt"  # fallback giữ nguyên
+
+
+class TestProcessQuery:
+    def test_custom_llm_fn(self):
+        from aic.core.query_processor import process_query
+
+        q = make_query("q_cook", "người đàn ông đang nấu ăn")
+        mock_response = {
+            "text_en": "a man cooking",
+            "expanded_vi": ["đầu bếp", "nấu nướng", "làm món"],
+            "expanded_en": ["chef", "preparing food", "kitchen"],
+            "objects": ["Person", "Food"],
+        }
+        res = process_query(q, llm_fn=lambda x: mock_response)
+        assert res.text_en == "a man cooking"
+        assert "đầu bếp" in res.expanded_vi
+        assert "chef" in res.expanded_en
+        assert "Person" in res.objects
+        assert "Food" in res.objects
+
+        bm25_text = res.for_bm25()
+        assert "người đàn ông đang nấu ăn" in bm25_text
+        assert "a man cooking" in bm25_text
+        assert "đầu bếp" in bm25_text
+        assert "chef" in bm25_text
+
+    def test_rule_based_fallback(self):
+        from aic.core.query_processor import process_query
+
+        q = make_query("q_car", "người lái xe ô tô", text_en="a person driving a car")
+        # llm failing -> fallback to rule based
+        res = process_query(q, llm_fn=lambda x: 1 / 0)
+        assert "Person" in res.objects
+        assert "Car" in res.objects
