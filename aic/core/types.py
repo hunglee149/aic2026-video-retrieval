@@ -16,6 +16,9 @@ class Query:
     query_id: str
     text_vi: str
     text_en: str = ""
+    expanded_en: list[str] = field(default_factory=list)
+    expanded_vi: list[str] = field(default_factory=list)
+    objects: list[str] = field(default_factory=list)
     task: str = "kis"  # kis | qa | trake
     n_events: int = 1
 
@@ -24,6 +27,17 @@ class Query:
 
     def for_text(self) -> str:
         return self.text_vi
+
+    def for_bm25(self) -> str:
+        """Chuỗi text kết hợp song ngữ + từ đồng nghĩa mở rộng cho BM25."""
+        parts = [self.text_vi]
+        if self.text_en:
+            parts.append(self.text_en)
+        if self.expanded_vi:
+            parts.extend(self.expanded_vi)
+        if self.expanded_en:
+            parts.extend(self.expanded_en)
+        return " ".join(parts).strip()
 
 
 @dataclass
