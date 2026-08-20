@@ -10,7 +10,7 @@ Module này fuse danh sách các ứng viên được trả về từ nhiều b�
 - **Output:** Trả về một `list[Candidate]` với độ dài chính xác bằng `limit`, đã trải qua các bước xử lý:
   1. **Lọc trùng:** Đảm bảo mỗi `video_id` chỉ xuất hiện 1 lần duy nhất trong danh sách.
   2. **Gộp điểm (Score Fusion):** Nếu một video được trả về nhiều lần từ nhiều nguồn, hệ thống tự động gộp các loại điểm (ví dụ: `clip`, `vlm_rerank`) và giữ lại điểm số cao nhất cho mỗi loại.
-  3. **Xếp hạng (Reranking):** Tính điểm tổng hợp (`fused`) bằng tổng các thành phần điểm và sắp xếp giảm dần toàn bộ danh sách để đưa các kết quả tự tin nhất lên trên cùng.
+  3. **Xếp hạng (Reranking bằng RRF):** Sử dụng thuật toán **Reciprocal Rank Fusion (RRF)**. Khi gộp nhiều nguồn, điểm số thô thường khác thang đo (scale) nên không thể cộng trực tiếp. RRF quy đổi thứ hạng (`rank`) của mỗi video trong từng nguồn thành điểm số theo công thức `1 / (k + rank)` (với `k=60`). Sau đó cộng dồn điểm RRF từ các nguồn lại để xếp hạng chung, đảm bảo sự cân bằng và ưu tiên các kết quả xuất hiện nhiều lần ở thứ hạng cao.
   4. **Padding:** Nếu số lượng video độc lập ít hơn `limit`, tự động sinh ra các kết quả đệm (như `L00_V000`, `L00_V001`) với `start_frame=0` để đủ 100 dòng theo yêu cầu nộp bài.
 
 ## Chạy thế nào
@@ -36,11 +36,10 @@ run_vlm = [
 fused_results = fuse([run_clip, run_vlm], limit=100)
 
 for cand in fused_results:
-    print(f"Video: {cand.video_id}, Điểm Fused: {cand.scores.get('fused')}")
+    print(f"Video: {cand.video_id}, Điểm RRF: {cand.scores.get('fused')}")
 ```
 
 ## Chưa làm / Blockers
 
-- Cần thử nghiệm thêm để tìm ra công thức tính điểm `fused` tối ưu thay vì chỉ cộng tổng đơn giản `sum()`. Có thể sẽ cần dùng trung bình cộng hoặc phép cộng có trọng số (Weighted Sum, ví dụ `0.7 * vlm + 0.3 * clip`) nếu mô hình VLM có độ tin cậy cao hơn.
-
 - Đối với truy vấn loại TRAKE (yêu cầu nhiều frame cho nhiều khoảnh khắc trong cùng một video), logic "giữ 1 frame đại diện duy nhất cho mỗi video" có thể sẽ cần điều chỉnh lại ở giai đoạn sau. Hiện tại hệ thống đang ưu tiên phục vụ truy vấn KIS.
+

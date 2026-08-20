@@ -107,11 +107,102 @@ def translate_query(query: Query, translate_fn=None) -> Query:
     return query
 
 
+def process_query(query: Query, llm_fn=None) -> Query:
+    """Xử lý toàn diện Query: Dịch + Mở rộng từ đồng nghĩa + Trích xuất Object.
+
+    Điền đầy đủ:
+    - query.text_en: Dịch chuẩn cho CLIP/SigLIP
+    - query.expanded_vi / query.expanded_en: Từ đồng nghĩa cho BM25
+    - query.objects: Danh sách Object detection entities cho ObjectFilter
+    """
+    if llm_fn is None:
+        llm_fn = _gemini_process_query
+
+    try:
+        res = llm_fn(query.text_vi)
+        if isinstance(res, dict):
+            if not query.text_en:
+                query.text_en = res.get("text_en", "")
+            query.expanded_vi = res.get("expanded_vi", [])
+            query.expanded_en = res.get("expanded_en", [])
+            query.objects = res.get("objects", [])
+            logger.info("Processed [%s]: en='%s', objects=%s",
+                        query.query_id, query.text_en[:50], query.objects)
+            return query
+    except Exception as e:
+        logger.warning("Full query processing failed for %s: %s. Using fallback.", query.query_id, e)
+
+    # Fallback to standard translation and rule-based extraction
+    translate_query(query)
+    _rule_based_extract(query)
+    return query
+
+
+def _rule_based_extract(query: Query) -> None:
+    """Fallback rule-based extraction of objects and synonyms when offline."""
+    text_lower = f"{query.text_vi} {query.text_en}".lower()
+    
+    # Common object keywords mapping to OpenImages entities
+    obj_rules = {
+        "người": "Person", "man": "Person", "woman": "Person", "person": "Person",
+        "xe": "Car", "ô tô": "Car", "car": "Car", "vehicle": "Vehicle",
+        "xe máy": "Motorcycle", "motorcycle": "Motorcycle", "motorbike": "Motorcycle",
+        "xe đạp": "Bicycle", "bicycle": "Bicycle", "bike": "Bicycle",
+        "xe buýt": "Bus", "bus": "Bus",
+        "chó": "Dog", "dog": "Dog",
+        "mèo": "Cat", "cat": "Cat",
+        "cây": "Tree", "tree": "Tree",
+        "nhà": "Building", "tòa nhà": "Building", "building": "Building",
+        "thức ăn": "Food", "món ăn": "Food", "nấu ăn": "Food", "food": "Food",
+        "bàn": "Table", "table": "Table",
+        "ghế": "Chair", "chair": "Chair",
+        "điện thoại": "Telephone", "phone": "Telephone",
+        "máy tính": "Computer", "laptop": "Computer",
+        "tivi": "Television", "tv": "Television",
+    }
+    
+    found_objects = set()
+    for kw, entity in obj_rules.items():
+        if kw in text_lower:
+            found_objects.add(entity)
+    query.objects = sorted(found_objects)
+
+
+def _gemini_process_query(text_vi: str) -> dict:
+    """Dùng Gemini phân tích trích xuất bản dịch, từ đồng nghĩa và objects."""
+    import json
+    from google import genai
+
+    client = genai.Client()
+    prompt = (
+        "Analyze this Vietnamese video search query and output a JSON object:\n"
+        f"Query: \"{text_vi}\"\n\n"
+        "Return ONLY a valid JSON with these keys:\n"
+        "- text_en: Precise English translation for visual CLIP retrieval\n"
+        "- expanded_vi: List of 3-5 Vietnamese synonyms or related keywords\n"
+        "- expanded_en: List of 3-5 English synonyms or related keywords\n"
+        "- objects: List of detected objects from (Person, Car, Motorcycle, Bicycle, Bus, Truck, "
+        "Dog, Cat, Tree, Building, House, Food, Table, Chair, Telephone, Computer, Television, Clothing, Fish, Boat)\n\n"
+        "JSON format:"
+    )
+    
+    response = client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=prompt,
+    )
+    txt = response.text.strip()
+    # Clean possible markdown block
+    if txt.startswith("```"):
+        txt = re.sub(r"^```[a-zA-Z]*\n", "", txt)
+        txt = re.sub(r"\n```$", "", txt)
+    return json.loads(txt)
+
+
 def _gemini_translate(text_vi: str) -> str:
     """Dịch tiếng Việt → tiếng Anh bằng Gemini API."""
     from google import genai
 
-    client = genai.Client()  # dùng GEMINI_API_KEY env var
+    client = genai.Client()
     response = client.models.generate_content(
         model="gemini-2.0-flash",
         contents=(

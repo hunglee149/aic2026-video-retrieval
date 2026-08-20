@@ -1,112 +1,152 @@
 # Module Retrieval (Bùi Trung Hiếu)
 
-Module chịu trách nhiệm tiếp nhận câu truy vấn (query), tìm kiếm trong cơ sở dữ liệu keyframes (FAISS index) hoặc sinh ứng viên giả lập (Dummy), đồng thời hỗ trợ cơ chế loại trừ (exclude) và phân tầng kết quả theo vòng lặp suy luận Iterative Retrieval (lấy cảm hứng từ VideoSearch-R1).
+Module chịu trách nhiệm tiếp nhận câu truy vấn từ đề thi của BTC, phân tích mở rộng query (Query Expansion), tìm kiếm đa kênh song song (**Visual Vector Search + BM25 Bilingual Text Search + Object Detection Soft Filter**), hỗ trợ cơ chế loại trừ (`exclude`) và phân tầng kết quả theo vòng lặp suy luận Iterative Retrieval (lấy cảm hứng từ VideoSearch-R1).
 
 ---
 
-## 1. Phần này làm gì?
+## 1. Kiến trúc Đa Kênh (Multi-Modal Hybrid Retrieval)
 
-1. **Quản lý & Tìm kiếm FAISS (`aic/retrieval/faiss_retriever.py`)**:
-   - Tải `clip_faiss.index` (hoặc `siglip_faiss.index`) và metadata JSON tương ứng (177,321 keyframes).
-   - Mã hoá câu truy vấn thành embedding vector, thực hiện tìm kiếm tương đồng cosine (Inner Product).
-   - Hỗ trợ tham số `exclude` để loại bỏ hoàn toàn các video đã được xác định là không khớp từ các vòng trước.
+Hệ thống kết hợp **4 nguồn dữ liệu độc lập** nhằm khắc phục triệt để điểm yếu của từng kênh riêng lẻ:
 
-2. **CLIP & SigLIP Retrievers (`aic/retrieval/clip.py`, `aic/retrieval/siglip.py`)**:
-   - Kết nối với mô hình text encoder của OpenCLIP (ViT-B-32) và SigLIP2.
-   - Trả về danh sách đối tượng `Candidate` chuẩn cho pipeline.
-
-3. **Iterative Retrieval (`aic/pipeline.py -> iterative_retrieve`)**:
-   - Chạy vòng lặp nhiều lượt (Retrieve ➡️ Verify ➡️ Exclude & Refine ➡️ Re-retrieve).
-   - Phân loại trạng thái:
-     - `not_matched`: đưa vào danh sách `exclude` cho lượt sau.
-     - `unsure`: giữ lại trong danh sách kết quả nhưng xếp hạng sau nhóm `matched`.
-
-4. **Query Processor (`aic/core/query_processor.py`)**:
-   - Đọc file `.txt` từ BTC, tự động nhận diện loại bài toán (`kis`, `qa`, `trake`).
-   - Hỗ trợ dịch tự động câu truy vấn từ Tiếng Việt sang Tiếng Anh.
-
----
-
-## 2. Input / Output
-
-### Input
-- **`query: Query`**: Đối tượng truy vấn chứa `query_id`, `text_vi`, `text_en`, `task` (`"kis"` | `"qa"` | `"trake"`).
-- **`k: int` / `limit: int`**: Số lượng ứng viên tối đa cần trả về (mặc định = 100).
-- **`exclude: frozenset[str]`**: Tập hợp các `video_id` cần bỏ qua, không được trả về trong kết quả.
-- **`verify_fn: Callable`** *(trong iterative_retrieve)*: Hàm nhận vào một `Candidate` và trả về một trong ba trạng thái: `"matched"`, `"not_matched"`, `"unsure"`.
-
-### Output
-- **`list[Candidate]`**: Danh sách ứng viên đã xếp hạng giảm dần theo độ phù hợp.
-  Mỗi `Candidate` gồm:
-  - `video_id: str`: Tên video (đã loại bỏ đuôi `.mp4`).
-  - `start_frame: int`, `end_frame: int`: Mốc khung hình bắt đầu / kết thúc (0-based).
-  - `representative_frames: list[int]`: Danh sách khung hình tiêu biểu (0-based).
-  - `scores: dict[str, float]`: Điểm số tương đồng theo từng model (ví dụ `{"clip": 0.854}`).
-  - `evidence: dict`: Chứa caption, metadata, hoặc reasoning từ VLM.
+```
+                            FILE QUERY BTC
+                       (pack1_q3_kis.txt)
+                               │
+                               ▼
+                   [Query Processor (LLM / Fallback)]
+             Sinh song ngữ + Từ đồng nghĩa + Nhãn Object
+                               │
+       ┌───────────────────────┼───────────────────────┐
+       ▼                       ▼                       ▼
+ [Kênh 1 & 2: Visual]    [Kênh 3: BM25 Text]     [Kênh 4: Object Filter]
+  CLIP & SigLIP2          ASR + OCR + Captions    OpenImages Soft Filter
+  (177K Keyframes)        (629K Docs Song Ngữ)    (114K Keyframes có điểm)
+       │                       │                       │
+       ▼                       ▼                       ▼
+  Scores: clip/siglip     Score: bm25             Score: object_match
+       │                       │                       │
+       └───────────────────────┼───────────────────────┘
+                               ▼
+                    [Score Fusion & Ranking]
+                     (Khử trùng & xếp hạng)
+                               ▼
+                   Top-100 Candidates Final
+```
 
 ---
 
-## 3. Chạy thế nào (Ví dụ gọi code)
+## 2. Các Thành Phần Chính Trong Module
 
-### a. Tìm kiếm đơn giản với Dummy Retriever (Testing)
+### 1. Visual Vector Search (`aic/retrieval/faiss_retriever.py`, `clip.py`, `siglip.py`)
+- **CLIP ViT-B/32 (`clip_faiss.index`)**: 177,321 vectors 512-dim. Tốc độ tìm kiếm ~0.005s.
+- **SigLIP2 (`siglip_faiss.index`)**: 177,321 vectors 1152-dim. Nắm bắt ngữ nghĩa hình ảnh chuyên sâu.
+- **Tính năng**: Hỗ trợ lọc `exclude` (loại bỏ video `not_matched` từ các vòng trước).
+
+### 2. BM25 Text Retriever (`aic/retrieval/text_retriever.py`)
+- Quét trên **629,404 tài liệu văn bản** trong `text_search_index.pkl`:
+  - **177,321 Caption Tiếng Việt** (VLM sinh mô tả chi tiết từng keyframe).
+  - **177,321 Caption Tiếng Anh** (VLM sinh mô tả tiếng Anh chuẩn hóa).
+  - **136,928 OCR Tiếng Việt** (Chữ trên màn hình: tít tin, bảng hiệu, logo đài).
+  - **134,371 ASR Tiếng Việt** (Lời thoại bóc tách từ Faster-Whisper kèm timestamp).
+  - **1,746 Tóm tắt Video** (Chủ đề chương trình, tên kênh).
+- **Hỗ trợ tìm kiếm không dấu / có dấu / chữ hoa:** Tự động chuẩn hóa song song Unicode (`tokenize_bilingual`), đảm bảo gõ có dấu, gõ không dấu (`da lat`), hay chữ hoa bảng hiệu (`DA LAT`) đều khớp 100%.
+
+### 3. Object Detection Soft Filter (`aic/retrieval/object_filter.py`)
+- Nạp trực tiếp từ `objects_index.pkl` (13.6 MB) trong **0.05 giây**.
+- Chứa toàn bộ 873 video, 114,885 keyframe có vật thể (`Person`, `Car`, `Food`, `Tree`, `Boat`...) đi kèm **Confidence Score thật**.
+- **Cơ chế Soft Scoring**: Không loại bỏ ứng viên (tránh False Negative) mà cộng điểm thưởng (`object_match`) dựa trên tỷ lệ khớp và độ tin cậy của vật thể.
+
+### 4. Query Processor Toàn Diện (`aic/core/query_processor.py`)
+- **`process_query(query)`**:
+  - Dịch sang tiếng Anh chuẩn (`query.text_en`) cho CLIP/SigLIP.
+  - Tự động sinh từ đồng nghĩa tiếng Việt & tiếng Anh (`query.expanded_vi`, `query.expanded_en`).
+  - Tự động rút trích danh sách vật thể (`query.objects`) cho `ObjectFilter`.
+  - **Fallback Rule-based**: Hoạt động trơn tru ngay cả khi offline / mất kết nối API LLM.
+- **`query.for_bm25()`**: Kết hợp tất cả từ khóa mở rộng thành chuỗi tìm kiếm phong phú cho BM25.
+
+---
+
+## 3. Cấu Trúc Dữ Liệu Đã Tối Ưu (`local/index/`)
+
+Toàn bộ dữ liệu của **Batch 1 (10 batches L21 $\rightarrow$ L30, 873 video, 177,321 keyframe)** đã được nén gọn thành **6 file duy nhất** trong `local/index/`:
+
+| Tên File | Dung lượng | Mô tả nội dung |
+| :--- | :---: | :--- |
+| `clip_faiss.index` | 346 MB | 177,321 vector CLIP ViT-B/32 (512 chiều) |
+| `clip_metadata.json` | 14.4 MB | Metadata 1:1 cho vector CLIP |
+| `siglip_faiss.index` | 779 MB | 177,321 vector SigLIP2 (1152 chiều) |
+| `siglip_metadata.json` | 11.1 MB | Metadata 1:1 cho vector SigLIP2 |
+| `text_search_index.pkl` | 537 MB | 629,404 documents (ASR + OCR + Captions song ngữ + BM25 index) |
+| `objects_index.pkl` | 13.6 MB | 177,321 keyframe objects kèm detection scores của 873 video |
+
+> **Ghi chú đối soát:** Đã kiểm tra đối chiếu trực tiếp với 14 file zip gốc trong `D:\AIC 2026\batch_01`, **trùng khớp 100%** không thiếu một video hay keyframe nào.
+
+---
+
+## 4. Hướng Dẫn Sử Dụng Code
+
+### a. Tìm kiếm Text BM25 (Song ngữ + Không dấu)
 ```python
 from aic.core.types import Query
-from aic.retrieval import dummy
+from aic.retrieval.text_retriever import build_text_retriever
 
-query = Query(query_id="pack1_q3_kis", text_vi="cảnh cháy rừng ở châu Âu", task="kis")
-candidates = dummy.search(query, k=100, exclude=frozenset({"L21_V001"}))
+# 1. Khởi tạo retriever (load trong vài giây)
+text_retriever = build_text_retriever("local/index/text_search_index.pkl")
 
-print(f"Số lượng kết quả: {len(candidates)}")
-print(f"Top-1 video: {candidates[0].video_id}, score: {candidates[0].best_score}")
+# 2. Tìm kiếm (chấp nhận cả tiếng Việt có dấu, không dấu hoặc tiếng Anh)
+query = Query(query_id="q1", text_vi="nguoi dan ong nau an trong bep")
+candidates = text_retriever.search(query, k=100)
+
+print(f"Top-1: {candidates[0].video_id}, Evidence: {candidates[0].evidence}")
 ```
 
-### b. Tìm kiếm với CLIP FAISS Index thật
+### b. Chấm điểm bổ trợ bằng Object Filter
 ```python
-from aic.core.query_processor import make_query, translate_query
-from aic.retrieval.clip import build_clip_retriever
+from aic.retrieval.object_filter import build_object_filter
 
-# 1. Khởi tạo retriever
-clip_retriever = build_clip_retriever(
-    index_path="local/clip_faiss.index",
-    metadata_path="local/clip_metadata.json"
+obj_filter = build_object_filter("local/index")
+
+# Cộng điểm bonus cho các candidate nếu có chứa "Person" và "Food"
+candidates = obj_filter.apply_scores(
+    candidates,
+    query_objects=["Person", "Food"],
+    score_key="object_match",
+    weight=0.3
 )
-
-# 2. Tạo query và dịch sang tiếng Anh cho CLIP
-query = make_query("q1", text_vi="Người phụ nữ mặc áo đỏ đang đi dạo trong công viên")
-query = translate_query(query)  # Sinh query.text_en
-
-# 3. Tìm kiếm top 100
-candidates = clip_retriever.search(query, k=100)
 ```
 
-### c. Chạy vòng lặp Iterative Retrieval (Retrieve + Exclude + Unsure)
+### c. Chạy Pipeline Đa Kênh Tự Động
 ```python
-from aic.pipeline import iterative_retrieve
-from aic.retrieval import dummy
-from aic.fusion import rank
+from aic.core.query_processor import parse_query_file, process_query
+from aic.retrieval import build_clip_retriever, build_siglip_retriever, build_text_retriever, build_object_filter
+from aic.fusion.rank import fuse
+from aic.pipeline import run
 
-# Hàm verify giả lập (hoặc kết nối Gemini/UI)
-def mock_verify(cand):
-    if cand.video_id == "L21_V001":
-        return "not_matched"  # Loại bỏ video này ở các vòng sau
-    if cand.video_id == "L22_V002":
-        return "unsure"       # Giữ lại nhưng xếp sau nhóm matched
-    return "matched"
+# 1. Xử lý câu hỏi đề thi
+query = parse_query_file("queries/pack1_q3_kis.txt")
+query = process_query(query)  # Tự động dịch, sinh từ đồng nghĩa, trích object
 
-candidates = iterative_retrieve(
-    query=query,
-    retrievers=[dummy],
-    fuse_fn=rank.fuse,
-    verify_fn=mock_verify,
-    max_rounds=3,
-    limit=100
-)
+# 2. Nạp các nguồn tìm kiếm
+retrievers = [
+    build_clip_retriever("local/index/clip_faiss.index", "local/index/clip_metadata.json"),
+    build_siglip_retriever("local/index/siglip_faiss.index", "local/index/siglip_metadata.json"),
+    build_text_retriever("local/index/text_search_index.pkl"),
+]
+
+# 3. Tìm kiếm & gộp kết quả
+candidates = run(query, retrievers, fuse_fn=fuse, write_fn=None, out_path=None)
 ```
 
 ---
 
-## 4. Chưa làm / Blockers (Kế hoạch các ngày tới)
+## 5. Trạng Thái Hoàn Thành & Việc Tiếp Theo
 
-- [ ] **Tích hợp VLM Agentic Verify**: Thay hàm `verify_fn` giả lập bằng prompt Gemini 2.0 Flash / Qwen3-VL để tự động sinh suy luận `<think>...</think>` và chấm điểm match/not_matched/unsure trên ảnh keyframe thật.
-- [ ] **Soft Query Refinement (SQR / Text Refinement)**: Khi nhận phản hồi `not_matched`, tự động viết lại câu truy vấn tiếng Anh (reformulate query) trước khi gọi round tiếp theo thay vì chỉ dùng lại query cũ.
-- [ ] **Two-Stage Temporal Grounding**: Giải mã FPS gốc quanh khoảng 5–10s của keyframe tìm được để định vị chính xác khung hình theo yêu cầu của từng task (đặc biệt là TRAKE).
+- [x] **FAISS Vector Search**: CLIP & SigLIP2 hoạt động 100%.
+- [x] **BM25 Text Search**: Quét đồng thời ASR, OCR, Captions song ngữ, hỗ trợ không dấu / viết hoa.
+- [x] **Object Filter**: Gộp 178K frame objects thành `objects_index.pkl` (13.6MB) với điểm score chi tiết.
+- [x] **Query Expansion**: Tự động sinh từ đồng nghĩa song ngữ & trích xuất nhãn vật thể.
+- [x] **Đối soát dữ liệu**: 873/873 video, 177,321/177,321 keyframe khớp hoàn hảo 100%.
+- [ ] **Kế hoạch tiếp theo**:
+  - [ ] **VLM Agentic Verify**: Tích hợp Gemini 2.0 Flash / Qwen-VL duyệt ảnh keyframe thật để phân loại `matched`/`not_matched`/`unsure`.
+  - [ ] **RRF Score Fusion**: Nâng cấp công thức gộp điểm của Hà sang Reciprocal Rank Fusion.
+  - [ ] **Two-Stage Temporal Grounding**: Mở rộng khung hình lân cận cho bài toán TRAKE.
