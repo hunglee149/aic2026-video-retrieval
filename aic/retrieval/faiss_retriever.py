@@ -47,7 +47,10 @@ class FaissRetriever:
         self.encode_fn = encode_fn
 
         logger.info("Loading FAISS index from %s", index_path)
-        self.index = faiss.read_index(str(index_path))
+        try:
+            self.index = faiss.read_index(str(index_path), faiss.IO_FLAG_MMAP)
+        except Exception:
+            self.index = faiss.read_index(str(index_path))
         logger.info(
             "  → %d vectors, dim=%d", self.index.ntotal, self.index.d
         )
