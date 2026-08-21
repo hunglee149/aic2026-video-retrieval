@@ -229,10 +229,11 @@ class ExportRow(BaseModel):
     video_id: str
     frames: list[int]
     answer: str = ""
+    query_id: str = ""
 
 
 class ExportRequest(BaseModel):
-    query_id: str
+    query_id: str = "q1"
     task: str = "kis"
     rows: list[ExportRow]
 
@@ -437,28 +438,31 @@ def get_video_keyframes(video_id: str):
 
 @app.post("/api/export")
 def export_submission(req: ExportRequest):
-    """Tạo submission.zip và trả về để tải xuống."""
-    rows = []
+    """Tạo submission.zip chứa thư mục submission/ và các file CSV đúng chuẩn BTC."""
+    rows_by_query = {}
     for row in req.rows:
-        vid = row.video_id.removesuffix(".mp4")
-        r = [vid] + [str(f) for f in row.frames]
+        qid = (row.query_id or req.query_id or "q1").strip()
+        vid = row.video_id.removesuffix(".mp4").strip()
+        r = [vid] + [str(int(f)) for f in row.frames]
         if row.answer:
-            r.append(row.answer)
-        rows.append(r)
+            r.append(row.answer.strip())
+        if qid not in rows_by_query:
+            rows_by_query[qid] = []
+        rows_by_query[qid].append(r)
 
-    if not rows:
+    if not rows_by_query:
         raise HTTPException(status_code=400, detail="No rows to export")
 
     with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
         tmp_path = tmp.name
 
     try:
-        write_submission({req.query_id: rows}, tmp_path)
+        write_submission(rows_by_query, tmp_path)
         zip_bytes = Path(tmp_path).read_bytes()
     finally:
         Path(tmp_path).unlink(missing_ok=True)
 
-    filename = f"{req.query_id}.zip"
+    filename = "submission.zip"
     return StreamingResponse(
         io.BytesIO(zip_bytes),
         media_type="application/zip",

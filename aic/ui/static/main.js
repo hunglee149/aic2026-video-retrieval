@@ -781,7 +781,12 @@ function refreshPreview() {
 async function doExport() {
   if (!state.selections.length) { toast('Chưa có lựa chọn để export', 'warning'); return; }
   const exportQueryId = $('export-query-id').value.trim() || $('query-id-input').value.trim() || 'q1';
-  const rows = state.selections.map(s => ({ video_id: s.video_id, frames: s.frames, answer: s.answer || '' }));
+  const rows = state.selections.map(s => ({
+    video_id: s.video_id,
+    frames: s.frames,
+    answer: s.answer || '',
+    query_id: s.queryId || exportQueryId,
+  }));
 
   setLoading('btn-export', true);
   try {
@@ -794,10 +799,10 @@ async function doExport() {
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = `${exportQueryId}.zip`;
+    a.href = url; a.download = 'submission.zip';
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
-    toast('Đã tải xuống submission.zip', 'success');
+    toast('Đã tải xuống submission.zip đúng chuẩn BTC!', 'success');
   } catch (e) {
     toast(e.message, 'error');
   } finally {
