@@ -167,36 +167,19 @@ def get_retrievers():
             import traceback
             logger.warning("BM25 load failed: %s\n%s", e, traceback.format_exc())
 
-    # 2. CLIP / SigLIP FAISS Vector Search
-    # Chỉ bật khi có đủ RAM (>8GB free) hoặc khi set AIC_ENABLE_NEURAL=1
-    if os.environ.get("AIC_ENABLE_NEURAL", "0") == "1":
-        # CLIP
-        clip_index = LOCAL_DIR / "clip_faiss.index"
-        clip_meta = LOCAL_DIR / "clip_metadata.json"
-        if clip_index.exists() and clip_meta.exists():
-            try:
-                from ..retrieval.clip import build_clip_retriever
-                logger.info("Loading CLIP retriever ...")
-                cr = build_clip_retriever(clip_index, clip_meta)
-                active_retrievers.append(cr)
-                logger.info("  ✓ CLIP ready")
-            except Exception as e:
-                logger.info("CLIP skipped: %s", e)
-
-        # SigLIP
-        siglip_index = LOCAL_DIR / "siglip_faiss.index"
-        siglip_meta = LOCAL_DIR / "siglip_metadata.json"
-        if siglip_index.exists() and siglip_meta.exists():
-            try:
-                from ..retrieval.siglip import build_siglip_retriever
-                logger.info("Loading SigLIP retriever ...")
-                sr = build_siglip_retriever(siglip_index, siglip_meta)
-                active_retrievers.append(sr)
-                logger.info("  ✓ SigLIP ready")
-            except Exception as e:
-                logger.info("SigLIP skipped: %s", e)
-    else:
-        logger.info("CLIP/SigLIP disabled (set AIC_ENABLE_NEURAL=1 to enable)")
+    # 2. CLIP FAISS Vector Search (Visual)
+    # Tự động nạp CLIP nếu có file index và metadata
+    clip_index = LOCAL_DIR / "clip_faiss.index"
+    clip_meta = LOCAL_DIR / "clip_metadata.json"
+    if clip_index.exists() and clip_meta.exists() and os.environ.get("AIC_DISABLE_NEURAL", "0") != "1":
+        try:
+            from ..retrieval.clip import build_clip_retriever
+            logger.info("Loading CLIP retriever from %s ...", clip_index)
+            cr = build_clip_retriever(clip_index, clip_meta)
+            active_retrievers.append(cr)
+            logger.info("  ✓ CLIP Visual Retriever ready (%d vectors)", cr.num_vectors)
+        except Exception as e:
+            logger.info("CLIP skipped: %s", e)
 
     # 4. Object Detection Filter (Tắt theo yêu cầu — chỉ dùng điểm BM25 text match)
     _object_filter = None
@@ -259,19 +242,22 @@ class CandidateOut(BaseModel):
 
 
 def _candidate_to_out(cand: Candidate, rank: int) -> dict:
-    # Lấy điểm BM25 text match trực tiếp làm best_score hiển thị
-    bm25_score = cand.scores.get("bm25")
-    display_score = bm25_score if bm25_score is not None else cand.best_score
     evidence = {}
-    if "transcript_match" in cand.evidence and cand.evidence["transcript_match"]:
-        evidence["transcript_match"] = cand.evidence["transcript_match"]
+    for ev_k in ("transcript_match", "ocr_match", "caption_match"):
+        if ev_k in cand.evidence and cand.evidence[ev_k]:
+            evidence[ev_k] = cand.evidence[ev_k]
+    if not evidence and cand.evidence:
+        evidence = cand.evidence
 
     scores = {}
-    if bm25_score is not None:
-        scores["bm25"] = round(bm25_score, 4)
     for k, v in cand.scores.items():
-        if k != "bm25" and k != "object_match":
+        if k != "object_match":
             scores[k] = round(v, 4)
+
+    # Điểm hiển thị trên huy hiệu card
+    display_score = cand.best_score
+    if "bm25" in cand.scores and len(scores) == 1:
+        display_score = cand.scores["bm25"]
 
     return {
         "video_id": cand.video_id,

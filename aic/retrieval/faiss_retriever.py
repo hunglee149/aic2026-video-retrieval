@@ -75,13 +75,17 @@ class FaissRetriever:
     def search(
         self,
         query: Query,
-        k: int = 100,
+        limit: int = 100,
         exclude: frozenset = frozenset(),
+        k: int = None,
     ) -> list[Candidate]:
         """Tìm top-k keyframes gần nhất với query text.
 
         Trả về list[Candidate] đã sắp xếp giảm dần theo score.
         """
+        if k is not None:
+            limit = k
+        k = limit
         text = query.for_clip()  # ưu tiên bản tiếng Anh
         embedding = self.encode_fn(text)
         embedding = np.asarray(embedding, dtype=np.float32).reshape(1, -1)

@@ -33,24 +33,39 @@ def _get_clip_encoder(
     model_name: str = DEFAULT_CLIP_MODEL,
     pretrained: str = DEFAULT_CLIP_PRETRAINED,
 ):
-    """Load CLIP text encoder, cache kết quả."""
+    """Load CLIP text encoder via open_clip hoặc transformers."""
     cache_key = (model_name, pretrained)
     if cache_key not in _clip_model_cache:
-        import open_clip
         import torch
 
-        logger.info("Loading CLIP model: %s / %s", model_name, pretrained)
-        model, _, preprocess = open_clip.create_model_and_transforms(
-            model_name, pretrained=pretrained
-        )
-        tokenizer = open_clip.get_tokenizer(model_name)
-        model.eval()
-
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        model = model.to(device)
-        logger.info("  → CLIP on %s", device)
+        try:
+            import open_clip
 
-        _clip_model_cache[cache_key] = (model, tokenizer, device)
+            logger.info("Loading CLIP model via open_clip: %s / %s", model_name, pretrained)
+            model, _, preprocess = open_clip.create_model_and_transforms(
+                model_name, pretrained=pretrained
+            )
+            tokenizer = open_clip.get_tokenizer(model_name)
+            model.eval().to(device)
+            encode_func = lambda t: model.encode_text(tokenizer([t]).to(device))
+        except Exception:
+            from transformers import CLIPModel, CLIPTokenizer
+
+            hf_name = "openai/clip-vit-base-patch32"
+            logger.info("Loading CLIP model via transformers: %s", hf_name)
+            tokenizer = CLIPTokenizer.from_pretrained(hf_name)
+            model = CLIPModel.from_pretrained(hf_name)
+            model.eval().to(device)
+
+            def encode_func(t):
+                inputs = tokenizer(
+                    [t], return_tensors="pt", padding=True, truncation=True
+                ).to(device)
+                return model.get_text_features(**inputs)
+
+        logger.info("  → CLIP ready on %s", device)
+        _clip_model_cache[cache_key] = (encode_func, device)
 
     return _clip_model_cache[cache_key]
 
@@ -63,10 +78,9 @@ def make_clip_encode_fn(
     import torch
 
     def encode(text: str) -> np.ndarray:
-        model, tokenizer, device = _get_clip_encoder(model_name, pretrained)
-        tokens = tokenizer([text]).to(device)
+        encode_func, device = _get_clip_encoder(model_name, pretrained)
         with torch.no_grad():
-            features = model.encode_text(tokens)
+            features = encode_func(text)
             features = features / features.norm(dim=-1, keepdim=True)
         return features.cpu().numpy().flatten()
 
