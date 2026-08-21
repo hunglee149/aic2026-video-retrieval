@@ -19,26 +19,26 @@ from .faiss_retriever import FaissRetriever
 
 logger = logging.getLogger(__name__)
 
-# SigLIP2 model name on HuggingFace
-DEFAULT_SIGLIP_MODEL = "google/siglip2-base-patch16-224"
+# SigLIP2 model name on HuggingFace (1152-dim)
+DEFAULT_SIGLIP_MODEL = "google/siglip2-so400m-patch14-224"
 
 _siglip_cache: dict = {}
 
 
 def _get_siglip_encoder(model_name: str = DEFAULT_SIGLIP_MODEL):
-    """Load SigLIP text encoder, cache kết quả."""
+    """Load SigLIP text encoder (chỉ nạp text tower để tiết kiệm RAM & siêu tốc)."""
     if model_name not in _siglip_cache:
         import torch
-        from transformers import AutoModel, AutoTokenizer
+        from transformers import AutoTokenizer, SiglipTextModel
 
-        logger.info("Loading SigLIP model: %s", model_name)
+        logger.info("Loading SigLIP text model: %s", model_name)
         tokenizer = AutoTokenizer.from_pretrained(model_name)
-        model = AutoModel.from_pretrained(model_name)
+        model = SiglipTextModel.from_pretrained(model_name)
         model.eval()
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model = model.to(device)
-        logger.info("  → SigLIP on %s", device)
+        logger.info("  → SigLIP text encoder ready on %s", device)
 
         _siglip_cache[model_name] = (model, tokenizer, device)
 
@@ -46,7 +46,7 @@ def _get_siglip_encoder(model_name: str = DEFAULT_SIGLIP_MODEL):
 
 
 def make_siglip_encode_fn(model_name: str = DEFAULT_SIGLIP_MODEL):
-    """Tạo hàm encode text → numpy vector cho SigLIP."""
+    """Tạo hàm encode text → numpy vector cho SigLIP2 (1152 chiều)."""
     import torch
 
     def encode(text: str) -> np.ndarray:
@@ -55,9 +55,10 @@ def make_siglip_encode_fn(model_name: str = DEFAULT_SIGLIP_MODEL):
             [text], return_tensors="pt", padding=True, truncation=True
         ).to(device)
         with torch.no_grad():
-            text_features = model.get_text_features(**inputs)
-            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-        return text_features.cpu().numpy().flatten()
+            outputs = model(**inputs)
+            feat = outputs.pooler_output if hasattr(outputs, "pooler_output") and outputs.pooler_output is not None else outputs.last_hidden_state[:, 0]
+            feat = feat / feat.norm(dim=-1, keepdim=True)
+        return feat.cpu().numpy().flatten()
 
     return encode
 

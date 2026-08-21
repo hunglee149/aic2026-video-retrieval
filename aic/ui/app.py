@@ -167,8 +167,20 @@ def get_retrievers():
             import traceback
             logger.warning("BM25 load failed: %s\n%s", e, traceback.format_exc())
 
-    # 2. CLIP FAISS Vector Search (Visual)
-    # Tự động nạp CLIP nếu có file index và metadata
+    # 2. SigLIP2 FAISS Vector Search (Visual, 1152-dim)
+    siglip_index = LOCAL_DIR / "siglip_faiss.index"
+    siglip_meta = LOCAL_DIR / "siglip_metadata.json"
+    if siglip_index.exists() and siglip_meta.exists() and os.environ.get("AIC_DISABLE_NEURAL", "0") != "1":
+        try:
+            from ..retrieval.siglip import build_siglip_retriever
+            logger.info("Loading SigLIP2 retriever from %s ...", siglip_index)
+            sr = build_siglip_retriever(siglip_index, siglip_meta)
+            active_retrievers.append(sr)
+            logger.info("  ✓ SigLIP2 Visual Retriever ready (%d vectors)", sr.num_vectors)
+        except Exception as e:
+            logger.info("SigLIP2 skipped: %s", e)
+
+    # 3. CLIP FAISS Vector Search (Visual, 512-dim)
     clip_index = LOCAL_DIR / "clip_faiss.index"
     clip_meta = LOCAL_DIR / "clip_metadata.json"
     if clip_index.exists() and clip_meta.exists() and os.environ.get("AIC_DISABLE_NEURAL", "0") != "1":
