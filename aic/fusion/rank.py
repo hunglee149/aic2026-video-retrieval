@@ -47,3 +47,8 @@ def fuse(runs, limit=100, k=60):
         
     return out
 
+
+# Aliases for compatibility
+rrf_fuse = fuse
+rank = fuse
+
