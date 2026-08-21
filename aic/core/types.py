@@ -21,6 +21,8 @@ class Query:
     objects: list[str] = field(default_factory=list)
     task: str = "kis"  # kis | qa | trake
     n_events: int = 1
+    modalities: list[str] = field(default_factory=lambda: ["siglip", "caption", "ocr", "asr", "summary", "media_info"])
+    weights: dict[str, float] = field(default_factory=dict)
 
     def for_clip(self) -> str:
         return self.text_en or self.text_vi

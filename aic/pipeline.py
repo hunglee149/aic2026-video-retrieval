@@ -17,7 +17,12 @@ from .core.convert import to_answer, to_csv_row
 def retrieve_and_fuse(query, retrievers, fuse_fn, limit=100, exclude=frozenset()):
     """Gọi mọi nguồn tìm kiếm rồi trộn lại thành một danh sách ứng viên."""
     runs = [r.search(query, limit, exclude) for r in retrievers]
-    return fuse_fn(runs, limit=limit)
+    weights = getattr(query, "weights", None)
+    modalities = getattr(query, "modalities", None)
+    try:
+        return fuse_fn(runs, limit=limit, weights=weights, modalities=modalities)
+    except TypeError:
+        return fuse_fn(runs, limit=limit)
 
 
 def to_rows(query, candidates, chosen_frames=None, answers=None):

@@ -86,6 +86,11 @@ class FaissRetriever:
         if k is not None:
             limit = k
         k = limit
+
+        if hasattr(query, "modalities") and query.modalities is not None:
+            if self.name in ("siglip", "clip") and self.name not in query.modalities and "visual" not in query.modalities:
+                return []
+
         text = query.for_clip()  # ưu tiên bản tiếng Anh
         embedding = self.encode_fn(text)
         embedding = np.asarray(embedding, dtype=np.float32).reshape(1, -1)

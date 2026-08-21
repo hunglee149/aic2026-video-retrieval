@@ -270,6 +270,8 @@ def make_query(
     text_en: str = "",
     task: str = "kis",
     n_events: int = 1,
+    modalities: list[str] = None,
+    weights: dict[str, float] = None,
 ) -> Query:
     """Helper để tạo Query nhanh (cho notebook / testing)."""
     return Query(
@@ -278,4 +280,6 @@ def make_query(
         text_en=text_en,
         task=task,
         n_events=n_events,
+        modalities=modalities if modalities is not None else ["siglip", "caption", "ocr", "asr", "summary", "media_info"],
+        weights=weights or {},
     )

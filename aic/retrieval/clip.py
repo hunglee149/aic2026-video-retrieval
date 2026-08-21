@@ -74,15 +74,17 @@ def make_clip_encode_fn(
     model_name: str = DEFAULT_CLIP_MODEL,
     pretrained: str = DEFAULT_CLIP_PRETRAINED,
 ):
-    """Tạo hàm encode text → numpy vector cho CLIP."""
+    """Tạo hàm encode text → numpy vector cho CLIP (siêu tiết kiệm RAM)."""
     import torch
 
     def encode(text: str) -> np.ndarray:
         encode_func, device = _get_clip_encoder(model_name, pretrained)
-        with torch.no_grad():
+        with torch.inference_mode():
             features = encode_func(text)
             features = features / features.norm(dim=-1, keepdim=True)
-        return features.cpu().numpy().flatten()
+            res = features.cpu().numpy().flatten()
+        del features
+        return res
 
     return encode
 

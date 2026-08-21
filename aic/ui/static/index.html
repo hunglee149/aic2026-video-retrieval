@@ -49,6 +49,13 @@
       <!-- SIDEBAR -->
       <aside id="sidebar">
         <div class="sidebar-section">
+          <label class="label" for="preset-query-select">📂 Gói đề thi chính thức (Pack 1)</label>
+          <select id="preset-query-select" class="preset-select" onchange="loadPresetQuery(this.value)">
+            <option value="">-- Chọn câu hỏi đề thi (24 câu) --</option>
+          </select>
+        </div>
+
+        <div class="sidebar-section">
           <label class="label" for="query-input">Câu hỏi (Tiếng Việt)</label>
           <textarea id="query-input" rows="4"
             placeholder="Nhập mô tả cảnh cần tìm...&#10;Ví dụ: Người phụ nữ mặc áo đỏ đang đi dạo trong công viên lúc hoàng hôn"></textarea>
@@ -75,13 +82,58 @@
         </div>
 
         <div class="sidebar-section">
-          <label class="label" for="query-id-input">Query ID</label>
-          <input type="text" id="query-id-input" value="pack1_q1_kis" placeholder="pack1_q1_kis"/>
+          <label class="label" for="query-id-input">Mã câu hỏi (BTC Form)</label>
+          <input type="text" id="query-id-input" value="query-p1-1-kis" placeholder="query-p1-1-kis"/>
         </div>
 
         <div class="sidebar-section" id="n-events-section" style="display:none">
           <label class="label" for="n-events-input">Số events (TRAKE)</label>
           <input type="number" id="n-events-input" value="3" min="1" max="20"/>
+        </div>
+
+        <!-- Search Modality & Fusion Weights Checklist -->
+        <div class="sidebar-section">
+          <div class="modality-header">
+            <label class="label">🎯 Nguồn Tìm Kiếm &amp; Fusion</label>
+            <div class="modality-presets">
+              <button type="button" class="preset-btn active" id="preset-mod-all" onclick="setModalityPreset('all')" title="Trộn tất cả các nguồn (Mix Hybrid)">Tất cả</button>
+              <button type="button" class="preset-btn" id="preset-mod-asr" onclick="setModalityPreset('asr')" title="Chuyên Lời thoại &amp; Giọng nói (ASR)">🎙️ ASR</button>
+              <button type="button" class="preset-btn" id="preset-mod-ocr" onclick="setModalityPreset('ocr')" title="Chuyên Chữ trên màn hình &amp; Logo (OCR)">🔤 OCR</button>
+              <button type="button" class="preset-btn" id="preset-mod-visual" onclick="setModalityPreset('visual')" title="Chuyên Hình ảnh thị giác (SigLIP2)">👁️ Visual</button>
+            </div>
+          </div>
+          <div class="modality-grid">
+            <label class="modality-item" title="Khớp vector thị giác hình ảnh qua SigLIP2">
+              <input type="checkbox" id="mod-siglip" checked onchange="updateModalityState()"/>
+              <span class="mod-icon">👁️</span>
+              <span class="mod-name">SigLIP2</span>
+            </label>
+            <label class="modality-item" title="Mô tả cảnh quay và hành động keyframe (VLM)">
+              <input type="checkbox" id="mod-caption" checked onchange="updateModalityState()"/>
+              <span class="mod-icon">📝</span>
+              <span class="mod-name">Caption</span>
+            </label>
+            <label class="modality-item" title="Chữ xuất hiện trên video, tiêu đề, banner, logo">
+              <input type="checkbox" id="mod-ocr" checked onchange="updateModalityState()"/>
+              <span class="mod-icon">🔤</span>
+              <span class="mod-name">OCR &amp; Logo</span>
+            </label>
+            <label class="modality-item" title="Lời thoại phát thanh viên, thuyết minh, hội thoại">
+              <input type="checkbox" id="mod-asr" checked onchange="updateModalityState()"/>
+              <span class="mod-icon">🎙️</span>
+              <span class="mod-name">ASR Lời thoại</span>
+            </label>
+            <label class="modality-item" title="Tóm tắt nội dung video và chủ đề batch">
+              <input type="checkbox" id="mod-summary" checked onchange="updateModalityState()"/>
+              <span class="mod-icon">📋</span>
+              <span class="mod-name">Chủ đề Topic</span>
+            </label>
+            <label class="modality-item" title="Thông tin tệp video, thời lượng, metadata">
+              <input type="checkbox" id="mod-media_info" checked onchange="updateModalityState()"/>
+              <span class="mod-icon">ℹ️</span>
+              <span class="mod-name">Media Info</span>
+            </label>
+          </div>
         </div>
 
         <div class="sidebar-section">
@@ -144,8 +196,12 @@
       <aside id="detail-panel">
         <div class="detail-header">
           <span class="detail-title">Chi tiết lựa chọn</span>
-          <div style="display:flex; align-items:center; gap:8px;">
-            <span class="badge badge-gray" id="detail-rank-badge">—</span>
+          <div class="detail-rank-controls">
+            <button class="btn-pin-top" id="btn-pin-top" onclick="moveSelectedToTop()" title="Đưa ngay video này lên Top 1">🥇 Lên #1</button>
+            <div class="rank-input-wrap" title="Nhập số thứ hạng mới (1-100) rồi nhấn Enter">
+              <span>Rank #</span>
+              <input type="number" id="detail-rank-input" min="1" max="100" class="rank-input" onchange="onDetailRankInputChange(this.value)" onkeydown="if(event.key==='Enter')onDetailRankInputChange(this.value)" value="1"/>
+            </div>
           </div>
         </div>
         <div class="detail-body">
@@ -195,9 +251,19 @@
 
           <!-- Frame picker -->
           <div class="detail-section">
-            <div class="detail-section-title">Chọn frame</div>
+            <div class="detail-section-title">Chọn frame (đồng bộ sang kết quả)</div>
             <div class="frame-picker-row">
               <input type="number" id="frame-input" placeholder="Frame index" min="0"/>
+            </div>
+          </div>
+
+          <!-- Direct Video & Frame Replacer -->
+          <div class="detail-section" id="detail-change-video-section">
+            <div class="detail-section-title">🔄 Đổi Video &amp; Frame cho Top này</div>
+            <div class="change-video-row">
+              <input type="text" id="custom-video-input" placeholder="Mã video (VD: L21_V024)" class="custom-vid-input"/>
+              <input type="number" id="custom-frame-input" placeholder="Frame #" class="custom-kf-input" min="0"/>
+              <button class="btn-change-video" onclick="applyCustomVideoAndFrame()" title="Áp dụng thay đổi Video &amp; Frame cho Top này">Áp dụng</button>
             </div>
           </div>
 
@@ -373,6 +439,7 @@
             <button class="btn btn-secondary btn-sm" onclick="clearAllSelections()" style="margin-left:8px;color:var(--red);border-color:rgba(239,68,68,0.3);font-size:11px;padding:3px 8px;" title="Xóa toàn bộ lựa chọn">🗑️ Xóa tất cả</button>
           </div>
           <div class="export-card-body">
+            <div id="export-clusters-bar" class="export-clusters-bar" style="display:none"></div>
             <div id="export-alert"></div>
             <table class="summary-table" id="export-table">
               <thead>

@@ -138,10 +138,10 @@ _loaded: bool = False
 
 
 def get_retrievers():
-    """Nạp tất cả các bộ tìm kiếm có sẵn từ thư mục local/."""
-    global _retrievers, _object_filter, _loaded
+    """Khởi tạo retrievers (chỉ load khi có request đầu tiên)."""
+    global _loaded, _retrievers, _object_filter, _video_summaries, _video_transcripts, _frame_captions, _frame_ocrs
     if _loaded:
-        return _retrievers, _object_filter
+        return _retrievers, None
 
     if USE_DUMMY:
         logger.info("AIC_USE_DUMMY=1: Using dummy retriever")
@@ -161,8 +161,27 @@ def get_retrievers():
             logger.info("Loading BM25 Text Retriever from %s ...", text_index)
             tr = build_text_retriever(text_index)
             active_retrievers.append(tr)
+
+            # Build fast evidence lookup tables
+            for doc in tr.documents:
+                vid = doc.get("video_id")
+                if not vid:
+                    continue
+                dtype = doc.get("type")
+                text = doc.get("text", "")
+                kf = doc.get("keyframe_num") or doc.get("frame_idx")
+                if dtype == "caption_summary" and vid not in _video_summaries:
+                    _video_summaries[vid] = text
+                elif dtype == "transcript_full" and vid not in _video_transcripts:
+                    _video_transcripts[vid] = text
+                elif dtype == "caption" and kf is not None:
+                    _frame_captions[(vid, int(kf))] = text
+                elif dtype == "ocr" and kf is not None:
+                    _frame_ocrs[(vid, int(kf))] = text
+
             gc.collect()  # Giải phóng RAM sau khi load xong
-            logger.info("  ✓ BM25 Text Retriever ready (%d documents)", tr.num_documents)
+            logger.info("  ✓ BM25 Text Retriever ready (%d documents, %d summaries, %d captions, %d ocrs)",
+                        tr.num_documents, len(_video_summaries), len(_frame_captions), len(_frame_ocrs))
         except Exception as e:
             import traceback
             logger.warning("BM25 load failed: %s\n%s", e, traceback.format_exc())
@@ -180,20 +199,7 @@ def get_retrievers():
         except Exception as e:
             logger.info("SigLIP2 skipped: %s", e)
 
-    # 3. CLIP FAISS Vector Search (Visual, 512-dim)
-    clip_index = LOCAL_DIR / "clip_faiss.index"
-    clip_meta = LOCAL_DIR / "clip_metadata.json"
-    if clip_index.exists() and clip_meta.exists() and os.environ.get("AIC_DISABLE_NEURAL", "0") != "1":
-        try:
-            from ..retrieval.clip import build_clip_retriever
-            logger.info("Loading CLIP retriever from %s ...", clip_index)
-            cr = build_clip_retriever(clip_index, clip_meta)
-            active_retrievers.append(cr)
-            logger.info("  ✓ CLIP Visual Retriever ready (%d vectors)", cr.num_vectors)
-        except Exception as e:
-            logger.info("CLIP skipped: %s", e)
-
-    # 4. Object Detection Filter (Tắt theo yêu cầu — chỉ dùng điểm BM25 text match)
+    # 3. Object Detection Filter (Tắt theo yêu cầu — chỉ dùng điểm BM25 text match)
     _object_filter = None
 
     # Fallback to dummy if no retrievers could be loaded
@@ -203,7 +209,7 @@ def get_retrievers():
 
     _retrievers = active_retrievers
     _loaded = True
-    return _retrievers, _object_filter
+    return _retrievers, None
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +225,8 @@ class SearchRequest(BaseModel):
     n_events: int = 1
     k: int = 100
     exclude: list[str] = []
+    modalities: list[str] = ["siglip", "caption", "ocr", "asr", "summary", "media_info"]
+    weights: dict[str, float] = {}
 
 
 class TranslateRequest(BaseModel):
@@ -255,12 +263,28 @@ class CandidateOut(BaseModel):
 
 
 def _candidate_to_out(cand: Candidate, rank: int) -> dict:
-    evidence = {}
+    vid = cand.video_id
+    batch = vid.split("_")[0] if "_" in vid else vid
+    evidence = {
+        "video_id": vid,
+        "batch": f"Tập {batch}",
+    }
+
+    if vid in _video_summaries:
+        evidence["video_summary"] = _video_summaries[vid]
+    if vid in _video_transcripts:
+        evidence["transcript"] = _video_transcripts[vid][:300] + "..."
+
+    rep_kf = cand.representative_frames[0] if cand.representative_frames else cand.start_frame
+    if rep_kf:
+        if (vid, rep_kf) in _frame_captions:
+            evidence["caption"] = _frame_captions[(vid, rep_kf)]
+        if (vid, rep_kf) in _frame_ocrs:
+            evidence["ocr"] = _frame_ocrs[(vid, rep_kf)]
+
     for ev_k in ("transcript_match", "ocr_match", "caption_match"):
         if ev_k in cand.evidence and cand.evidence[ev_k]:
             evidence[ev_k] = cand.evidence[ev_k]
-    if not evidence and cand.evidence:
-        evidence = cand.evidence
 
     scores = {}
     for k, v in cand.scores.items():
@@ -274,6 +298,7 @@ def _candidate_to_out(cand: Candidate, rank: int) -> dict:
 
     return {
         "video_id": cand.video_id,
+        "batch": f"Tập {batch}",
         "start_frame": cand.start_frame,
         "end_frame": cand.end_frame,
         "representative_frames": cand.representative_frames,
@@ -338,6 +363,8 @@ def search(req: SearchRequest):
         text_en=req.text_en,
         task=req.task,
         n_events=req.n_events,
+        modalities=req.modalities,
+        weights=req.weights,
     )
     query = process_query(query)
     exclude = frozenset(req.exclude)
@@ -357,10 +384,15 @@ def search(req: SearchRequest):
         logger.error("Search error: %s\n%s", e, traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e) or repr(e))
 
+    import gc
+    out_candidates = [_candidate_to_out(c, i + 1) for i, c in enumerate(candidates)]
+    del candidates
+    gc.collect()
+
     return {
         "ok": True,
-        "total": len(candidates),
-        "candidates": [_candidate_to_out(c, i + 1) for i, c in enumerate(candidates)],
+        "total": len(out_candidates),
+        "candidates": out_candidates,
     }
 
 
@@ -398,6 +430,23 @@ def get_keyframe(video_id: str, frame_idx: int):
   <polygon points="155,47 155,63 171,55" fill="rgba(255,255,255,0.5)"/>
 </svg>"""
     return Response(content=svg.encode(), media_type="image/svg+xml")
+
+
+@app.get("/api/evidence/{video_id}/{frame_idx}")
+def get_frame_evidence(video_id: str, frame_idx: int):
+    """Lấy toàn bộ thông tin bằng chứng chi tiết của 1 frame: Caption, OCR, Video Summary, ASR."""
+    get_retrievers()  # Ensure index maps are loaded
+    batch = video_id.split("_")[0] if "_" in video_id else video_id
+    return {
+        "ok": True,
+        "video_id": video_id,
+        "batch": f"Tập {batch}",
+        "frame_idx": frame_idx,
+        "video_summary": _video_summaries.get(video_id, ""),
+        "caption": _frame_captions.get((video_id, frame_idx), ""),
+        "ocr": _frame_ocrs.get((video_id, frame_idx), ""),
+        "transcript": _video_transcripts.get(video_id, ""),
+    }
 
 
 @app.get("/api/video_keyframes/{video_id}")
@@ -453,11 +502,17 @@ def export_submission(req: ExportRequest):
     if not rows_by_query:
         raise HTTPException(status_code=400, detail="No rows to export")
 
+    # Sắp xếp các câu hỏi theo đúng thứ tự số tự nhiên (query-p1-1, query-p1-2, ..., query-p1-25)
+    def _nat_key(s: str):
+        return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
+
+    sorted_rows_by_query = dict(sorted(rows_by_query.items(), key=lambda x: _nat_key(x[0])))
+
     with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
         tmp_path = tmp.name
 
     try:
-        write_submission(rows_by_query, tmp_path)
+        write_submission(sorted_rows_by_query, tmp_path)
         zip_bytes = Path(tmp_path).read_bytes()
     finally:
         Path(tmp_path).unlink(missing_ok=True)

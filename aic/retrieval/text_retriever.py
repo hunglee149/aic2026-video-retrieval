@@ -25,14 +25,28 @@ def remove_accents(input_str: str) -> str:
     return res.replace("đ", "d").replace("Đ", "d")
 
 
+VI_EN_STOPWORDS = {
+    "và", "của", "ở", "tại", "trong", "được", "cho", "với", "các", "những", "một", "này", "đó",
+    "có", "là", "đã", "đang", "sẽ", "bị", "bởi", "do", "từ", "đến", "về", "ra", "vào",
+    "lại", "qua", "lên", "xuống", "cùng", "theo", "sau", "trước", "khi", "như", "để", "thì",
+    "va", "cua", "o", "tai", "trong", "duoc", "cho", "voi", "cac", "nhung", "mot", "nay", "do",
+    "co", "la", "da", "dang", "se", "bi", "boi", "tu", "den", "ve", "ra", "vao",
+    "lai", "qua", "len", "xuong", "cung", "theo", "sau", "truoc", "khi", "nhu", "de", "thi",
+    "a", "an", "the", "in", "on", "at", "of", "for", "with", "and", "is", "are", "was", "were", "to", "by",
+}
+
+
 def tokenize_bilingual(text: str) -> list[str]:
-    """Tokenize sinh cả token có dấu và token không dấu."""
+    """Tokenize sinh cả token có dấu và token không dấu, lọc bỏ stop words gây nhiễu."""
     import re
     text_lower = text.lower().strip()
-    tokens = re.findall(r'[\w]+', text_lower, re.UNICODE)
+    raw_tokens = re.findall(r'[\w]+', text_lower, re.UNICODE)
+    tokens = [t for t in raw_tokens if t not in VI_EN_STOPWORDS and len(t) > 1]
+
     unaccented_text = remove_accents(text_lower)
     if unaccented_text != text_lower:
-        unaccented_tokens = re.findall(r'[\w]+', unaccented_text, re.UNICODE)
+        raw_unaccented = re.findall(r'[\w]+', unaccented_text, re.UNICODE)
+        unaccented_tokens = [t for t in raw_unaccented if t not in VI_EN_STOPWORDS and len(t) > 1]
         tokens.extend(unaccented_tokens)
     return tokens
 
@@ -144,10 +158,32 @@ class TextRetriever:
     def search(
         self,
         query: Query,
-        k: int = 100,
+        limit: int = 100,
         exclude: frozenset = frozenset(),
+        k: int = None,
     ) -> list[Candidate]:
-        """BM25 search siêu tốc qua Inverted Index, trả về top-k Candidate."""
+        """BM25 search siêu tốc qua Inverted Index với lọc đa phương thức (Modalities)."""
+        if k is not None:
+            limit = k
+        k = limit
+
+        # Xác định các nguồn dữ liệu văn bản được chọn
+        mod_map = {
+            "caption": "caption",
+            "ocr": "ocr",
+            "transcript_segment": "asr",
+            "transcript_full": "asr",
+            "caption_summary": "summary",
+            "summary": "summary",
+            "media_info": "media_info",
+        }
+        active_modalities = set(query.modalities) if (hasattr(query, "modalities") and query.modalities is not None) else None
+        weights = getattr(query, "weights", {}) or {}
+
+        # Nếu người dùng tắt tất cả các nguồn text thì bỏ qua BM25
+        if active_modalities is not None and not any(m in active_modalities for m in ("caption", "ocr", "asr", "summary", "media_info")):
+            return []
+
         # 1. Tokenize query
         if hasattr(query, "for_bm25"):
             query_text = query.for_bm25().lower()
@@ -176,8 +212,11 @@ class TextRetriever:
         if not doc_scores:
             return []
 
-        # 3. Gom nhóm theo video_id, chọn document có điểm cao nhất mỗi video
-        video_best: dict[str, tuple[float, dict]] = {}
+        # 3. Gom nhóm theo video_id và từng modality
+        video_mod_scores: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        video_mod_docs: dict[str, dict[str, dict]] = defaultdict(dict)
+        video_best_doc: dict[str, tuple[float, dict]] = {}
+
         for doc_idx, score in doc_scores.items():
             if score <= 0 or doc_idx >= len(self.documents):
                 continue
@@ -185,24 +224,45 @@ class TextRetriever:
             vid = doc.get("video_id", "")
             if not vid or vid in exclude:
                 continue
-            if vid not in video_best or score > video_best[vid][0]:
-                video_best[vid] = (score, doc)
 
-        if not video_best:
+            doc_type = doc.get("type", "")
+            mod = mod_map.get(doc_type, "caption")
+
+            # Lọc nếu modality không được chọn
+            if active_modalities is not None and mod not in active_modalities:
+                continue
+
+            w = weights.get(mod, 1.0)
+            weighted_score = score * w
+
+            if weighted_score > video_mod_scores[vid][mod]:
+                video_mod_scores[vid][mod] = weighted_score
+                video_mod_docs[vid][mod] = doc
+
+            if vid not in video_best_doc or weighted_score > video_best_doc[vid][0]:
+                video_best_doc[vid] = (weighted_score, doc)
+
+        if not video_best_doc:
             return []
 
+        # Tính tổng điểm BM25 cho mỗi video
+        video_totals = {}
+        for vid, mod_sc in video_mod_scores.items():
+            video_totals[vid] = sum(mod_sc.values())
+
         # 4. Chuẩn hóa điểm [0, 1] và sắp xếp giảm dần
-        max_score = max(s for s, _ in video_best.values()) if video_best else 1.0
-        sorted_videos = sorted(video_best.items(), key=lambda x: x[1][0], reverse=True)[:k]
+        max_total = max(video_totals.values()) if video_totals else 1.0
+        sorted_videos = sorted(video_totals.items(), key=lambda x: x[1], reverse=True)[:k]
 
         candidates = []
-        for vid, (score, doc) in sorted_videos:
-            norm_score = score / max_score if max_score > 0 else 0.0
+        for vid, total_sc in sorted_videos:
+            norm_total = total_sc / max_total if max_total > 0 else 0.0
+            best_doc = video_best_doc[vid][1]
 
-            kf_num = doc.get("keyframe_num", 0)
+            kf_num = best_doc.get("keyframe_num", 0)
             # Nếu keyframe_num = 0 nhưng có start_time (transcript), tự động ánh xạ sang keyframe gần nhất
-            if kf_num == 0 and ("start_time" in doc or "pts_time" in doc):
-                st = doc.get("start_time") or doc.get("pts_time", 0)
+            if kf_num == 0 and ("start_time" in best_doc or "pts_time" in best_doc):
+                st = best_doc.get("start_time") or best_doc.get("pts_time", 0)
                 sec = 0.0
                 if isinstance(st, (int, float)):
                     sec = float(st)
@@ -228,16 +288,25 @@ class TextRetriever:
 
             frame_idx = kf_num
 
+            # Build sub-scores
+            scores = {self.name: round(norm_total, 6)}
+            for m, sc in video_mod_scores[vid].items():
+                scores[m] = round(sc / max_total, 4)
+
             # Build evidence
             evidence = {}
-            doc_type = doc.get("type", "")
-            text_snippet = doc.get("text", "")[:200]
-            if doc_type == "ocr":
-                evidence["ocr_match"] = text_snippet
-            elif doc_type == "caption":
-                evidence["caption_match"] = text_snippet
-            elif doc_type in ("transcript_segment", "transcript_full"):
-                evidence["transcript_match"] = text_snippet
+            for m, doc_item in video_mod_docs[vid].items():
+                snippet = doc_item.get("text", "")[:250]
+                if m == "ocr":
+                    evidence["ocr_match"] = snippet
+                elif m == "caption":
+                    evidence["caption_match"] = snippet
+                elif m == "asr":
+                    evidence["transcript_match"] = snippet
+                elif m == "summary":
+                    evidence["summary_match"] = snippet
+                elif m == "media_info":
+                    evidence["media_info_match"] = snippet
 
             candidates.append(
                 Candidate(
@@ -245,7 +314,7 @@ class TextRetriever:
                     start_frame=frame_idx,
                     end_frame=frame_idx,
                     representative_frames=[frame_idx],
-                    scores={self.name: round(norm_score, 6)},
+                    scores=scores,
                     evidence=evidence,
                 )
             )
