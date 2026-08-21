@@ -4,8 +4,7 @@
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>AIC 2026 — Video Retrieval</title>
-  <meta name="description" content="Hệ thống tìm kiếm sự kiện trong video cho AI Challenge HCMC 2026"/>
-  <link rel="stylesheet" href="/static/style.css"/>
+  <link rel="stylesheet" href="/static/style.css?v=12"/>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>"/>
 </head>
 <body>
@@ -138,11 +137,16 @@
         </div>
       </section>
 
+      <!-- Resizable Drag Handle -->
+      <div id="panel-resizer" class="panel-resizer" title="Kéo sang trái/phải để mở rộng hoặc thu gọn panel chi tiết"></div>
+
       <!-- RIGHT: Detail panel -->
       <aside id="detail-panel">
         <div class="detail-header">
           <span class="detail-title">Chi tiết lựa chọn</span>
-          <span class="badge badge-gray" id="detail-rank-badge">—</span>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span class="badge badge-gray" id="detail-rank-badge">—</span>
+          </div>
         </div>
         <div class="detail-body">
           <!-- Preview -->
@@ -154,6 +158,27 @@
               <span>Chọn một candidate</span>
             </div>
             <img id="preview-img" src="" alt="" style="display:none"/>
+          </div>
+
+          <!-- Timeline Keyframes Browser -->
+          <div class="detail-section" id="detail-timeline-section" style="display:none">
+            <div class="detail-section-title" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+              <span>🎬 Dải Keyframes Video</span>
+              <div style="display:flex; align-items:center; gap:6px;">
+                <button class="timeline-nav-btn" onclick="toggleTimelineGrid()" id="btn-timeline-grid" title="Chuyển chế độ Lưới/Dải cuộn">⊞ Lưới</button>
+                <span class="badge badge-purple" id="timeline-count-badge">0 frames</span>
+              </div>
+            </div>
+            
+            <!-- Quick Timeline Scrubber Controls -->
+            <div class="timeline-controls">
+              <button class="timeline-nav-btn" onclick="stepTimeline(-1)" title="Keyframe trước (Phím mũi tên ◄)">◀</button>
+              <input type="range" id="timeline-slider" min="0" max="0" value="0" class="timeline-slider" oninput="onTimelineSliderInput(this.value)"/>
+              <button class="timeline-nav-btn" onclick="stepTimeline(1)" title="Keyframe sau (Phím mũi tên ►)">▶</button>
+              <span id="timeline-current-info" class="timeline-current-info">#1</span>
+            </div>
+
+            <div id="timeline-strip" class="timeline-strip"></div>
           </div>
 
           <!-- Scores -->
@@ -420,6 +445,6 @@
 <!-- Toast container -->
 <div id="toast-container"></div>
 
-<script src="/static/main.js"></script>
+<script src="/static/main.js?v=12"></script>
 </body>
 </html>

@@ -212,9 +212,10 @@ function renderCandidates() {
     else if (verdict === 'unsure') card.classList.add('unsure');
 
     const scoreCls = scoreClass(c.best_score);
+    const kfUrl = keyframeUrl(c.video_id, frameIdx);
     card.innerHTML = `
-      <div class="card-thumb">
-        <img src="${keyframeUrl(c.video_id, frameIdx)}" alt="${c.video_id}" loading="lazy"/>
+      <div class="card-thumb" ondblclick="openLightbox('${kfUrl}', '${c.video_id} (Frame #${frameIdx})')" title="Nhấp đúp để phóng to ảnh">
+        <img src="${kfUrl}" alt="${c.video_id}" loading="lazy"/>
         <div class="card-rank">#${c.rank}</div>
         <div class="card-score ${scoreCls}">${fmtScore(c.best_score)}</div>
       </div>
@@ -298,16 +299,217 @@ function selectCandidate(idx) {
   }
 
   const evidenceSection = $('detail-evidence-section');
-  if (c.evidence && Object.keys(c.evidence).length) {
+  if (c.evidence && (c.evidence.transcript_match || Object.keys(c.evidence).length)) {
     evidenceSection.style.display = '';
-    $('detail-evidence-text').textContent = JSON.stringify(c.evidence, null, 2);
+    const textEl = $('detail-evidence-text');
+    if (c.evidence.transcript_match) {
+      textEl.innerHTML = `
+        <div class="transcript-box">
+          <div class="transcript-label">📝 Khớp nội dung ASR / OCR / Caption:</div>
+          <div class="transcript-content">"${c.evidence.transcript_match}"</div>
+        </div>`;
+    } else {
+      textEl.textContent = JSON.stringify(c.evidence, null, 2);
+    }
   } else {
     evidenceSection.style.display = 'none';
   }
 
   $('frame-input').value = frameIdx;
   $('btn-confirm-selection').disabled = false;
+
+  // Tải danh sách toàn bộ keyframes của video lên Timeline Gallery
+  loadVideoTimeline(c.video_id, frameIdx);
 }
+
+// ---------------------------------------------------------------------------
+// Video Timeline Keyframes Browser
+// ---------------------------------------------------------------------------
+
+state.videoKeyframes = [];
+state.currentTimelineIdx = 0;
+state.currentVideoId = null;
+
+async function loadVideoTimeline(videoId, activeFrame) {
+  const section = $('detail-timeline-section');
+  const strip = $('timeline-strip');
+  const badge = $('timeline-count-badge');
+  const slider = $('timeline-slider');
+  const info = $('timeline-current-info');
+  if (!section || !strip) return;
+
+  section.style.display = '';
+  strip.innerHTML = '<div style="color:var(--text-muted);font-size:11px;padding:8px">Đang tải keyframes...</div>';
+  state.currentVideoId = videoId;
+
+  try {
+    const res = await fetch(`/api/video_keyframes/${encodeURIComponent(videoId)}`);
+    const data = await res.json();
+    if (!data.ok || !data.keyframes || !data.keyframes.length) {
+      section.style.display = 'none';
+      return;
+    }
+
+    state.videoKeyframes = data.keyframes;
+    badge.textContent = `${data.keyframes.length} frames`;
+    strip.innerHTML = '';
+
+    if (slider) {
+      slider.min = 0;
+      slider.max = data.keyframes.length - 1;
+    }
+
+    let activeIdx = 0;
+    data.keyframes.forEach((kf, idx) => {
+      const kfIdx = kf.frame_idx ?? kf.kf_num;
+      const kfNum = kf.kf_num ?? kfIdx;
+      const isActive = (kfNum === activeFrame || kfIdx === activeFrame);
+      if (isActive) activeIdx = idx;
+
+      const item = document.createElement('div');
+      item.className = `timeline-item ${isActive ? 'active' : ''}`;
+      item.dataset.index = idx;
+      const timeStr = (kf.pts_time !== null && kf.pts_time !== undefined) ? `${Number(kf.pts_time).toFixed(1)}s` : `#${kfNum}`;
+      item.title = `Keyframe #${kfNum} | Frame idx: ${kfIdx} (${timeStr})`;
+      
+      const imgUrl = keyframeUrl(videoId, kfNum);
+      item.innerHTML = `
+        <img src="${imgUrl}" alt="f${kfNum}" loading="lazy"/>
+        <div class="timeline-item-label">${timeStr}</div>
+      `;
+
+      item.addEventListener('click', () => {
+        selectTimelineKeyframe(idx);
+      });
+
+      strip.appendChild(item);
+    });
+
+    state.currentTimelineIdx = activeIdx;
+    if (slider) slider.value = activeIdx;
+    updateTimelineInfo(activeIdx);
+
+    // Tự động cuộn đến keyframe đang chọn
+    setTimeout(() => {
+      const activeEl = strip.querySelector('.timeline-item.active');
+      if (activeEl) {
+        activeEl.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+      }
+    }, 100);
+  } catch (e) {
+    section.style.display = 'none';
+  }
+}
+
+function selectTimelineKeyframe(idx) {
+  if (!state.videoKeyframes || idx < 0 || idx >= state.videoKeyframes.length) return;
+  state.currentTimelineIdx = idx;
+  const kf = state.videoKeyframes[idx];
+  const kfIdx = kf.frame_idx ?? kf.kf_num;
+  const kfNum = kf.kf_num ?? kfIdx;
+
+  const strip = $('timeline-strip');
+  if (strip) {
+    strip.querySelectorAll('.timeline-item').forEach((el, i) => {
+      el.classList.toggle('active', i === idx);
+    });
+    const activeEl = strip.querySelector(`.timeline-item[data-index="${idx}"]`);
+    if (activeEl) {
+      activeEl.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+    }
+  }
+
+  const slider = $('timeline-slider');
+  if (slider) slider.value = idx;
+
+  const img = $('preview-img');
+  if (img && state.currentVideoId) {
+    img.src = keyframeUrl(state.currentVideoId, kfNum);
+    img.alt = state.currentVideoId;
+  }
+  $('frame-input').value = kfIdx;
+  updateTimelineInfo(idx);
+}
+
+function updateTimelineInfo(idx) {
+  const info = $('timeline-current-info');
+  if (!info || !state.videoKeyframes[idx]) return;
+  const kf = state.videoKeyframes[idx];
+  const kfNum = kf.kf_num ?? kf.frame_idx;
+  const timeStr = (kf.pts_time !== null && kf.pts_time !== undefined) ? `${Number(kf.pts_time).toFixed(1)}s` : `#${kfNum}`;
+  info.textContent = `#${kfNum} (${timeStr})`;
+}
+
+function stepTimeline(delta) {
+  if (!state.videoKeyframes.length) return;
+  const newIdx = Math.max(0, Math.min(state.videoKeyframes.length - 1, state.currentTimelineIdx + delta));
+  selectTimelineKeyframe(newIdx);
+}
+
+function onTimelineSliderInput(val) {
+  selectTimelineKeyframe(parseInt(val, 10));
+}
+
+function toggleTimelineGrid() {
+  const strip = $('timeline-strip');
+  const btn = $('btn-timeline-grid');
+  if (!strip) return;
+  const isGrid = strip.classList.toggle('grid-mode');
+  if (btn) btn.textContent = isGrid ? '═ Dải ngang' : '⊞ Lưới';
+}
+
+// Phím tắt mũi tên trái/phải để tua frame
+document.addEventListener('keydown', (e) => {
+  if (document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+  if (e.key === 'ArrowLeft') {
+    e.preventDefault();
+    stepTimeline(-1);
+  } else if (e.key === 'ArrowRight') {
+    e.preventDefault();
+    stepTimeline(1);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Lightbox Fullscreen Viewer
+// ---------------------------------------------------------------------------
+
+function openLightbox(src, title) {
+  closeLightbox();
+  const modal = document.createElement('div');
+  modal.id = 'active-lightbox';
+  modal.className = 'lightbox-modal';
+  modal.innerHTML = `
+    <div class="lightbox-content" onclick="event.stopPropagation()">
+      <button class="lightbox-close" onclick="closeLightbox()" title="Đóng (ESC)">✕</button>
+      <img src="${src}" class="lightbox-img" alt="${title}"/>
+      <div class="lightbox-info">${title}</div>
+    </div>`;
+  modal.addEventListener('click', closeLightbox);
+  document.body.appendChild(modal);
+}
+
+function closeLightbox() {
+  const el = $('active-lightbox');
+  if (el) el.remove();
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeLightbox();
+});
+
+// Gắn sự kiện click zoom cho ảnh preview bên phải
+document.addEventListener('DOMContentLoaded', () => {
+  const previewWrap = $('preview-img-wrap');
+  if (previewWrap) {
+    previewWrap.addEventListener('click', () => {
+      const img = $('preview-img');
+      if (img && img.src && img.style.display !== 'none') {
+        openLightbox(img.src, `${img.alt} (Frame #${$('frame-input').value || 0})`);
+      }
+    });
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Confirm selection
@@ -648,6 +850,48 @@ document.addEventListener('keydown', (e) => {
   document.head.appendChild(style);
 })();
 
+function initPanelResizer() {
+  const resizer = $('panel-resizer');
+  const panel = $('detail-panel');
+  if (!resizer || !panel) return;
+
+  const savedWidth = localStorage.getItem('detail_panel_width');
+  if (savedWidth) {
+    panel.style.width = `${savedWidth}px`;
+  }
+
+  let isDragging = false;
+  let startX = 0;
+  let startWidth = 0;
+
+  resizer.addEventListener('mousedown', (e) => {
+    isDragging = true;
+    startX = e.clientX;
+    startWidth = panel.getBoundingClientRect().width;
+    resizer.classList.add('dragging');
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!isDragging) return;
+    const deltaX = startX - e.clientX; // Kéo sang trái -> tăng width
+    const newWidth = Math.max(260, Math.min(window.innerWidth * 0.65, startWidth + deltaX));
+    panel.style.width = `${newWidth}px`;
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (isDragging) {
+      isDragging = false;
+      resizer.classList.remove('dragging');
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      const w = parseInt(panel.style.width, 10);
+      if (w) localStorage.setItem('detail_panel_width', w);
+    }
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
@@ -656,6 +900,7 @@ document.addEventListener('DOMContentLoaded', () => {
   checkStatus();
   setInterval(checkStatus, 30000);
   selectTask('kis');
+  initPanelResizer();
   $('query-id-input').addEventListener('input', () => {
     $('export-query-id').value = $('query-id-input').value;
   });

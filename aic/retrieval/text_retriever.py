@@ -60,9 +60,22 @@ class TextRetriever:
         with open(index_path, "rb") as f:
             data = pickle.load(f)
 
-        all_documents = data["documents"]
-        all_tokenized = data["tokenized"]
         self.keyframe_map = data.get("keyframe_map", {})
+        all_documents = data["documents"]
+
+        # 1. Fast path: Đã được tính toán sẵn inverted index và idf
+        if "inverted" in data and "idf" in data and not doc_types:
+            self.documents = all_documents
+            self.inverted = data["inverted"]
+            self.idf = data["idf"]
+            self.N = data.get("N", len(all_documents))
+            self.avgdl = data.get("avgdl", 10.0)
+            self.tokenized = []
+            logger.info("  ✓ Instant loaded precomputed BM25 index (%d documents, %d unique terms)",
+                        self.N, len(self.idf))
+            return
+
+        all_tokenized = data.get("tokenized", [])
 
         # Filter by doc_types if specified
         if doc_types is not None:
@@ -134,63 +147,86 @@ class TextRetriever:
         k: int = 100,
         exclude: frozenset = frozenset(),
     ) -> list[Candidate]:
-        """BM25 search, trả về top-k Candidate theo score giảm dần."""
-        # Tokenize query (song ngữ + từ mở rộng + không dấu)
+        """BM25 search siêu tốc qua Inverted Index, trả về top-k Candidate."""
+        # 1. Tokenize query
         if hasattr(query, "for_bm25"):
             query_text = query.for_bm25().lower()
         else:
             text_vi = query.for_text().lower()
             text_en = query.for_clip().lower()
             query_text = f"{text_vi} {text_en}".strip()
-        
-        query_tokens = tokenize_bilingual(query_text)
 
+        query_tokens = tokenize_bilingual(query_text)
         if not query_tokens:
             return []
 
-        # Find candidate documents using inverted index
-        candidate_docs = set()
-        for qt in query_tokens:
-            if qt in self.inverted:
-                for doc_idx, _ in self.inverted[qt]:
-                    candidate_docs.add(doc_idx)
+        # 2. Tích lũy điểm BM25 trực tiếp từ Inverted Index
+        k1 = 1.5
+        b = 0.75
+        doc_scores = defaultdict(float)
 
-        # Score candidate documents
-        scored = []
-        for doc_idx in candidate_docs:
+        for qt in query_tokens:
+            if qt not in self.inverted or qt not in self.idf:
+                continue
+            idf = self.idf[qt]
+            for doc_idx, term_freq in self.inverted[qt]:
+                tf_norm = (term_freq * (k1 + 1)) / (term_freq + k1 * (1 - b + b))
+                doc_scores[doc_idx] += idf * tf_norm
+
+        if not doc_scores:
+            return []
+
+        # 3. Gom nhóm theo video_id, chọn document có điểm cao nhất mỗi video
+        video_best: dict[str, tuple[float, dict]] = {}
+        for doc_idx, score in doc_scores.items():
+            if score <= 0 or doc_idx >= len(self.documents):
+                continue
             doc = self.documents[doc_idx]
             vid = doc.get("video_id", "")
-            if vid in exclude:
+            if not vid or vid in exclude:
                 continue
-            score = self._bm25_score(query_tokens, doc_idx)
-            if score > 0:
-                scored.append((doc_idx, score))
-
-        # Sort by score descending
-        scored.sort(key=lambda x: x[1], reverse=True)
-
-        # Convert to Candidates — group by video, keep best score per video
-        video_best: dict[str, tuple[float, dict]] = {}
-        for doc_idx, score in scored:
-            doc = self.documents[doc_idx]
-            vid = doc["video_id"]
-
             if vid not in video_best or score > video_best[vid][0]:
                 video_best[vid] = (score, doc)
 
-        # Normalize scores to [0, 1]
-        if video_best:
-            max_score = max(s for s, _ in video_best.values())
-        else:
-            max_score = 1.0
+        if not video_best:
+            return []
+
+        # 4. Chuẩn hóa điểm [0, 1] và sắp xếp giảm dần
+        max_score = max(s for s, _ in video_best.values()) if video_best else 1.0
+        sorted_videos = sorted(video_best.items(), key=lambda x: x[1][0], reverse=True)[:k]
 
         candidates = []
-        for vid, (score, doc) in sorted(video_best.items(), key=lambda x: x[1][0], reverse=True):
+        for vid, (score, doc) in sorted_videos:
             norm_score = score / max_score if max_score > 0 else 0.0
 
-            # Get frame info from document
             kf_num = doc.get("keyframe_num", 0)
-            frame_idx = kf_num  # keyframe_num as proxy for frame position
+            # Nếu keyframe_num = 0 nhưng có start_time (transcript), tự động ánh xạ sang keyframe gần nhất
+            if kf_num == 0 and ("start_time" in doc or "pts_time" in doc):
+                st = doc.get("start_time") or doc.get("pts_time", 0)
+                sec = 0.0
+                if isinstance(st, (int, float)):
+                    sec = float(st)
+                elif isinstance(st, str) and st:
+                    parts = st.split(":")
+                    try:
+                        if len(parts) == 3:
+                            sec = float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+                        elif len(parts) == 2:
+                            sec = float(parts[0]) * 60 + float(parts[1])
+                        else:
+                            sec = float(st)
+                    except Exception:
+                        sec = 0.0
+
+                kfs = self.keyframe_map.get(vid, [])
+                if kfs:
+                    closest = min(kfs, key=lambda x: abs(x.get("pts_time", 0.0) - sec))
+                    kf_num = closest.get("kf_num", closest.get("frame_idx", 1))
+
+            if kf_num == 0:
+                kf_num = 1  # Fallback to frame 1
+
+            frame_idx = kf_num
 
             # Build evidence
             evidence = {}
@@ -214,9 +250,6 @@ class TextRetriever:
                 )
             )
 
-            if len(candidates) >= k:
-                break
-
         return candidates
 
     @property
@@ -225,14 +258,16 @@ class TextRetriever:
 
 
 def build_text_retriever(
-    index_dir: str | Path = "local/index",
+    index_path: str | Path = "local/text_search_index.pkl",
     name: str = "bm25",
     doc_types: list[str] | None = None,
 ) -> TextRetriever:
-    """Factory function — tạo TextRetriever từ thư mục index."""
-    index_dir = Path(index_dir)
+    """Factory function — tạo TextRetriever từ file hoặc thư mục."""
+    p = Path(index_path)
+    if p.is_dir():
+        p = p / "text_search_index.pkl"
     return TextRetriever(
-        index_path=index_dir / "text_search_index.pkl",
+        index_path=p,
         name=name,
         doc_types=doc_types,
     )

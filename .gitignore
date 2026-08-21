@@ -1,7 +1,8 @@
-ata/
+data/
 drive/
 keyframes/
 outputs/
+temp/
 *.npy
 *.npz
 *.index

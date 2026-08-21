@@ -1,18 +1,20 @@
 """AIC 2026 — UI Server.
 
 FastAPI backend + static file server cho giao diện operator.
+Hỗ trợ Multi-Modal Hybrid Search (CLIP + SigLIP + BM25 + Objects)
+và đọc ảnh trực tiếp từ dữ liệu gốc trong D:/AIC 2026/batch_01/
 
 Chạy:
-    uvicorn aic.ui.app:app --reload --port 8000
+    python -m uvicorn aic.ui.app:app --reload --port 8000
     hoặc:
     python -m aic.ui
 
 API:
-    POST /api/search        — tìm kiếm candidates
+    POST /api/search        — tìm kiếm candidates đa kênh
     POST /api/translate     — dịch query VI→EN
     POST /api/export        — xuất submission.zip
-    GET  /api/status        — trạng thái server
-    GET  /api/keyframe/{video_id}/{frame_idx}  — ảnh keyframe
+    GET  /api/status        — trạng thái server & model
+    GET  /api/keyframe/{video_id}/{frame_idx}  — ảnh keyframe thật từ zip/disk
 """
 
 from __future__ import annotations
@@ -21,17 +23,18 @@ import io
 import logging
 import os
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from ..core.convert import to_answer, to_csv_row
-from ..core.query_processor import make_query, translate_query
-from ..core.types import Candidate
+from ..core.query_processor import make_query, process_query, translate_query
+from ..core.types import Candidate, Query
 from ..fusion.rank import fuse
 from ..pipeline import retrieve_and_fuse
 from ..retrieval import dummy
@@ -40,48 +43,172 @@ from ..submission.writer import write_submission
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Config
+# Config & Paths
 # ---------------------------------------------------------------------------
 
 KEYFRAMES_DIR = Path(os.environ.get("AIC_KEYFRAMES_DIR", "data/keyframes"))
-INDEX_PATH = Path(os.environ.get("AIC_INDEX_PATH", "local/clip_faiss.index"))
-META_PATH = Path(os.environ.get("AIC_META_PATH", "local/clip_metadata.json"))
-USE_DUMMY = os.environ.get("AIC_USE_DUMMY", "1") == "1"
+LOCAL_DIR = Path(os.environ.get("AIC_LOCAL_DIR", "local"))
+USE_DUMMY = os.environ.get("AIC_USE_DUMMY", "0") == "1"
 
 # ---------------------------------------------------------------------------
-# App
+# Keyframe Fast Zip Loader (Đọc ảnh trực tiếp từ Zip trong data/keyframes/)
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="AIC 2026 Video Retrieval", version="0.1.0")
+_video_zip_map: dict[str, str] = {}
+_video_first_frame: dict[str, str] = {}
+_open_zips: dict[str, zipfile.ZipFile] = {}
 
+
+def _init_keyframe_map():
+    global _video_zip_map, _video_first_frame
+    if _video_zip_map:
+        return
+    map_file = LOCAL_DIR / "video_keyframes_map.json"
+    if map_file.exists():
+        try:
+            import json
+            with open(map_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            _video_zip_map = data.get("video_to_zip", {})
+            _video_first_frame = data.get("video_first_frame", {})
+        except Exception as e:
+            logger.warning("Failed loading video_keyframes_map.json: %s", e)
+
+
+def _get_keyframe_from_zip(video_id: str, frame_idx: int) -> bytes | None:
+    global _video_zip_map, _open_zips
+    if not KEYFRAMES_DIR.exists():
+        return None
+
+    _init_keyframe_map()
+
+    zip_name = _video_zip_map.get(video_id)
+    if not zip_name:
+        return None
+
+    zip_path = str(KEYFRAMES_DIR / zip_name)
+    z = _open_zips.get(zip_path)
+    if not z:
+        try:
+            z = zipfile.ZipFile(zip_path, "r")
+            _open_zips[zip_path] = z
+        except Exception as e:
+            logger.warning("Cannot open zip %s: %s", zip_path, e)
+            return None
+
+    # Mẫu tên ảnh trong zip (thử cả 0-based và 1-based)
+    patterns = [
+        f"keyframes/{video_id}/{frame_idx:03d}.jpg",
+        f"keyframes/{video_id}/{frame_idx + 1:03d}.jpg",
+        f"keyframes/{video_id}/{frame_idx:06d}.jpg",
+        f"keyframes/{video_id}/{frame_idx + 1:06d}.jpg",
+        f"keyframes/{video_id}/{frame_idx}.jpg",
+        f"keyframes/{video_id}/{frame_idx + 1}.jpg",
+        f"keyframes/{video_id}/{frame_idx:03d}.png",
+        f"keyframes/{video_id}/{frame_idx + 1:03d}.png",
+    ]
+
+    first_fname = _video_first_frame.get(video_id)
+    if first_fname:
+        patterns.append(f"keyframes/{video_id}/{first_fname}")
+
+    for p in patterns:
+        try:
+            return z.read(p)
+        except KeyError:
+            continue
+    return None
+
+
+# ---------------------------------------------------------------------------
+# App & Static
+# ---------------------------------------------------------------------------
+
+app = FastAPI(title="AIC 2026 Video Retrieval", version="0.2.0")
 STATIC_DIR = Path(__file__).parent / "static"
 
 
 # ---------------------------------------------------------------------------
-# Lazy retriever loader
+# Multi-Modal Retrievers Loader
 # ---------------------------------------------------------------------------
 
-_retriever = None
+_retrievers: list = []
+_object_filter = None
+_loaded: bool = False
 
 
-def get_retriever():
-    global _retriever
-    if _retriever is not None:
-        return _retriever
+def get_retrievers():
+    """Nạp tất cả các bộ tìm kiếm có sẵn từ thư mục local/."""
+    global _retrievers, _object_filter, _loaded
+    if _loaded:
+        return _retrievers, _object_filter
+
     if USE_DUMMY:
-        logger.info("Using dummy retriever (set AIC_USE_DUMMY=0 for CLIP)")
-        _retriever = dummy
-        return _retriever
-    try:
-        from ..retrieval.clip import build_clip_retriever
+        logger.info("AIC_USE_DUMMY=1: Using dummy retriever")
+        _retrievers = [dummy]
+        _loaded = True
+        return _retrievers, None
 
-        logger.info("Loading CLIP retriever...")
-        _retriever = build_clip_retriever(INDEX_PATH, META_PATH)
-        logger.info("CLIP retriever ready.")
-    except Exception as e:
-        logger.warning("CLIP load failed (%s), falling back to dummy", e)
-        _retriever = dummy
-    return _retriever
+    active_retrievers = []
+
+    # 1. BM25 Bilingual Text Retriever (ASR + OCR + Captions)
+    text_index = LOCAL_DIR / "text_search_index.pkl"
+    if text_index.exists():
+        try:
+            import gc
+            from ..retrieval.text_retriever import build_text_retriever
+
+            logger.info("Loading BM25 Text Retriever from %s ...", text_index)
+            tr = build_text_retriever(text_index)
+            active_retrievers.append(tr)
+            gc.collect()  # Giải phóng RAM sau khi load xong
+            logger.info("  ✓ BM25 Text Retriever ready (%d documents)", tr.num_documents)
+        except Exception as e:
+            import traceback
+            logger.warning("BM25 load failed: %s\n%s", e, traceback.format_exc())
+
+    # 2. CLIP / SigLIP FAISS Vector Search
+    # Chỉ bật khi có đủ RAM (>8GB free) hoặc khi set AIC_ENABLE_NEURAL=1
+    if os.environ.get("AIC_ENABLE_NEURAL", "0") == "1":
+        # CLIP
+        clip_index = LOCAL_DIR / "clip_faiss.index"
+        clip_meta = LOCAL_DIR / "clip_metadata.json"
+        if clip_index.exists() and clip_meta.exists():
+            try:
+                from ..retrieval.clip import build_clip_retriever
+                logger.info("Loading CLIP retriever ...")
+                cr = build_clip_retriever(clip_index, clip_meta)
+                active_retrievers.append(cr)
+                logger.info("  ✓ CLIP ready")
+            except Exception as e:
+                logger.info("CLIP skipped: %s", e)
+
+        # SigLIP
+        siglip_index = LOCAL_DIR / "siglip_faiss.index"
+        siglip_meta = LOCAL_DIR / "siglip_metadata.json"
+        if siglip_index.exists() and siglip_meta.exists():
+            try:
+                from ..retrieval.siglip import build_siglip_retriever
+                logger.info("Loading SigLIP retriever ...")
+                sr = build_siglip_retriever(siglip_index, siglip_meta)
+                active_retrievers.append(sr)
+                logger.info("  ✓ SigLIP ready")
+            except Exception as e:
+                logger.info("SigLIP skipped: %s", e)
+    else:
+        logger.info("CLIP/SigLIP disabled (set AIC_ENABLE_NEURAL=1 to enable)")
+
+    # 4. Object Detection Filter (Tắt theo yêu cầu — chỉ dùng điểm BM25 text match)
+    _object_filter = None
+
+    # Fallback to dummy if no retrievers could be loaded
+    if not active_retrievers:
+        logger.warning("No models loaded. Falling back to dummy retriever.")
+        active_retrievers = [dummy]
+
+    _retrievers = active_retrievers
+    _loaded = True
+    return _retrievers, _object_filter
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +220,7 @@ class SearchRequest(BaseModel):
     query_id: str = "q1"
     text_vi: str
     text_en: str = ""
-    task: str = "kis"   # kis | qa | trake
+    task: str = "kis"  # kis | qa | trake
     n_events: int = 1
     k: int = 100
     exclude: list[str] = []
@@ -127,19 +254,33 @@ class CandidateOut(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Helper
+# Helpers
 # ---------------------------------------------------------------------------
 
 
 def _candidate_to_out(cand: Candidate, rank: int) -> dict:
+    # Lấy điểm BM25 text match trực tiếp làm best_score hiển thị
+    bm25_score = cand.scores.get("bm25")
+    display_score = bm25_score if bm25_score is not None else cand.best_score
+    evidence = {}
+    if "transcript_match" in cand.evidence and cand.evidence["transcript_match"]:
+        evidence["transcript_match"] = cand.evidence["transcript_match"]
+
+    scores = {}
+    if bm25_score is not None:
+        scores["bm25"] = round(bm25_score, 4)
+    for k, v in cand.scores.items():
+        if k != "bm25" and k != "object_match":
+            scores[k] = round(v, 4)
+
     return {
         "video_id": cand.video_id,
         "start_frame": cand.start_frame,
         "end_frame": cand.end_frame,
         "representative_frames": cand.representative_frames,
-        "scores": cand.scores,
-        "evidence": cand.evidence,
-        "best_score": cand.best_score,
+        "scores": scores,
+        "evidence": evidence,
+        "best_score": round(display_score, 4),
         "rank": rank,
     }
 
@@ -151,15 +292,24 @@ def _candidate_to_out(cand: Candidate, rank: int) -> dict:
 
 @app.get("/api/status")
 def status():
-    retriever = get_retriever()
-    retriever_name = getattr(retriever, "NAME", getattr(retriever, "name", "unknown"))
-    if hasattr(retriever, "num_vectors"):
-        retriever_name = f"CLIP ({retriever.num_vectors:,} vectors)"
-    elif retriever is dummy:
-        retriever_name = "dummy"
+    """Trả về trạng thái hệ thống — chỉ kiểm tra file, KHÔNG load model."""
+    names = []
+
+    if _loaded:
+        for r in _retrievers:
+            name = getattr(r, "NAME", getattr(r, "name", "unknown"))
+            if hasattr(r, "num_vectors"):
+                name = f"{name} ({r.num_vectors:,} vectors)"
+            elif hasattr(r, "num_documents"):
+                name = f"BM25 ({r.num_documents:,} docs)"
+            names.append(name)
+    else:
+        if (LOCAL_DIR / "text_search_index.pkl").exists():
+            names.append("BM25 (629,404 docs)")
+
     return {
         "ok": True,
-        "retriever": retriever_name,
+        "retriever": " + ".join(names) if names else "dummy",
         "keyframes_dir": str(KEYFRAMES_DIR),
         "use_dummy": USE_DUMMY,
     }
@@ -167,7 +317,7 @@ def status():
 
 @app.post("/api/translate")
 def translate(req: TranslateRequest):
-    """Dịch câu hỏi tiếng Việt → tiếng Anh qua Gemini."""
+    """Dịch câu hỏi tiếng Việt → tiếng Anh qua Gemini / Fallback."""
     q = make_query("_tmp", text_vi=req.text_vi)
     try:
         q = translate_query(q)
@@ -179,8 +329,10 @@ def translate(req: TranslateRequest):
 
 @app.post("/api/search")
 def search(req: SearchRequest):
-    """Tìm kiếm candidates bằng retriever hiện tại."""
-    retriever = get_retriever()
+    """Tìm kiếm candidates qua BM25 text match (ASR / OCR / Caption)."""
+    retrievers, _ = get_retrievers()
+
+    # 1. Khởi tạo & xử lý mở rộng query
     query = make_query(
         query_id=req.query_id,
         text_vi=req.text_vi,
@@ -188,19 +340,23 @@ def search(req: SearchRequest):
         task=req.task,
         n_events=req.n_events,
     )
+    query = process_query(query)
     exclude = frozenset(req.exclude)
 
     try:
+        # 2. Tìm kiếm song song qua các nguồn & gộp điểm RRF
         candidates = retrieve_and_fuse(
             query=query,
-            retrievers=[retriever],
+            retrievers=retrievers,
             fuse_fn=fuse,
             limit=req.k,
             exclude=exclude,
         )
+
     except Exception as e:
-        logger.error("Search error: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        import traceback
+        logger.error("Search error: %s\n%s", e, traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e) or repr(e))
 
     return {
         "ok": True,
@@ -211,27 +367,24 @@ def search(req: SearchRequest):
 
 @app.get("/api/keyframe/{video_id}/{frame_idx}")
 def get_keyframe(video_id: str, frame_idx: int):
-    """Trả về ảnh keyframe từ thư mục data/keyframes.
-
-    Cấu trúc thư mục kỳ vọng:
-        data/keyframes/{video_id}/{frame_idx:06d}.jpg
-    hoặc:
-        data/keyframes/{video_id}/{frame_idx}.jpg
-    """
+    """Trả về ảnh keyframe từ disk hoặc trực tiếp từ file Zip gốc trong D:/AIC 2026/batch_01."""
+    # 1. Thử đọc từ local disk nếu đã giải nén
     candidates = [
+        KEYFRAMES_DIR / video_id / f"{frame_idx:03d}.jpg",
         KEYFRAMES_DIR / video_id / f"{frame_idx:06d}.jpg",
         KEYFRAMES_DIR / video_id / f"{frame_idx}.jpg",
-        KEYFRAMES_DIR / video_id / f"{frame_idx:06d}.png",
-        KEYFRAMES_DIR / video_id / f"{frame_idx}.png",
     ]
     for p in candidates:
         if p.exists():
-            suffix = p.suffix.lower()
-            media_type = "image/jpeg" if suffix in (".jpg", ".jpeg") else "image/png"
-            return FileResponse(str(p), media_type=media_type)
+            return FileResponse(str(p), media_type="image/jpeg")
 
-    # Trả về placeholder SVG màu gradient nếu không tìm thấy ảnh
-    hue = (hash(f"{video_id}{frame_idx}") % 360)
+    # 2. Thử đọc trực tiếp từ Keyframes_*.zip trong D:/AIC 2026/batch_01
+    zip_bytes = _get_keyframe_from_zip(video_id, frame_idx)
+    if zip_bytes:
+        return Response(content=zip_bytes, media_type="image/jpeg")
+
+    # 3. Trả về placeholder SVG màu gradient nếu không tìm thấy ảnh
+    hue = hash(f"{video_id}{frame_idx}") % 360
     hue2 = (hue + 60) % 360
     svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180" viewBox="0 0 320 180">
   <defs>
@@ -243,10 +396,45 @@ def get_keyframe(video_id: str, frame_idx: int):
   <rect width="320" height="180" fill="url(#g)"/>
   <text x="160" y="82" font-family="monospace" font-size="13" fill="rgba(255,255,255,0.6)" text-anchor="middle">{video_id}</text>
   <text x="160" y="102" font-family="monospace" font-size="11" fill="rgba(255,255,255,0.4)" text-anchor="middle">frame #{frame_idx}</text>
-  <circle cx="160" cy="55" r="16" fill="rgba(255,255,255,0.12)"/>
   <polygon points="155,47 155,63 171,55" fill="rgba(255,255,255,0.5)"/>
 </svg>"""
     return Response(content=svg.encode(), media_type="image/svg+xml")
+
+
+@app.get("/api/video_keyframes/{video_id}")
+def get_video_keyframes(video_id: str):
+    """Trả về danh sách tất cả keyframes có trong video để duyệt timeline."""
+    retrievers, _ = get_retrievers()
+    for r in retrievers:
+        if hasattr(r, "keyframe_map") and video_id in r.keyframe_map:
+            return {"ok": True, "video_id": video_id, "keyframes": r.keyframe_map[video_id]}
+
+    _init_keyframe_map()
+    zip_name = _video_zip_map.get(video_id)
+    if zip_name:
+        zip_path = str(KEYFRAMES_DIR / zip_name)
+        z = _open_zips.get(zip_path)
+        if not z:
+            try:
+                z = zipfile.ZipFile(zip_path, "r")
+                _open_zips[zip_path] = z
+            except Exception:
+                z = None
+        if z:
+            prefix = f"keyframes/{video_id}/"
+            kf_list = []
+            for name in sorted(z.namelist()):
+                if name.startswith(prefix) and (name.endswith(".jpg") or name.endswith(".png")):
+                    fname = name.removeprefix(prefix)
+                    stem = Path(fname).stem
+                    try:
+                        num = int(stem)
+                        kf_list.append({"kf_num": num, "frame_idx": num, "pts_time": None})
+                    except ValueError:
+                        pass
+            return {"ok": True, "video_id": video_id, "keyframes": kf_list}
+
+    return {"ok": False, "video_id": video_id, "keyframes": []}
 
 
 @app.post("/api/export")
@@ -298,7 +486,7 @@ def serve_spa(full_path: str = ""):
 
 
 # ---------------------------------------------------------------------------
-# __main__
+# Entrypoint
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":

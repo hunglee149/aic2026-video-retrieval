@@ -10,7 +10,9 @@ Quy ước query_id = tên file bỏ đuôi, ví dụ "pack1_q3_kis".
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
 from pathlib import Path
 
@@ -168,52 +170,98 @@ def _rule_based_extract(query: Query) -> None:
     query.objects = sorted(found_objects)
 
 
-def _gemini_process_query(text_vi: str) -> dict:
-    """Dùng Gemini phân tích trích xuất bản dịch, từ đồng nghĩa và objects."""
-    import json
-    from google import genai
-
-    client = genai.Client()
-    prompt = (
-        "Analyze this Vietnamese video search query and output a JSON object:\n"
-        f"Query: \"{text_vi}\"\n\n"
-        "Return ONLY a valid JSON with these keys:\n"
-        "- text_en: Precise English translation for visual CLIP retrieval\n"
-        "- expanded_vi: List of 3-5 Vietnamese synonyms or related keywords\n"
-        "- expanded_en: List of 3-5 English synonyms or related keywords\n"
-        "- objects: List of detected objects from (Person, Car, Motorcycle, Bicycle, Bus, Truck, "
-        "Dog, Cat, Tree, Building, House, Food, Table, Chair, Telephone, Computer, Television, Clothing, Fish, Boat)\n\n"
-        "JSON format:"
-    )
+def _format_as_caption(text_en: str) -> str:
+    """Định dạng bản dịch tiếng Anh theo đúng cấu trúc Caption của tập dữ liệu."""
+    text_en = text_en.strip()
+    if not text_en:
+        return ""
     
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt,
-    )
-    txt = response.text.strip()
-    # Clean possible markdown block
-    if txt.startswith("```"):
-        txt = re.sub(r"^```[a-zA-Z]*\n", "", txt)
-        txt = re.sub(r"\n```$", "", txt)
-    return json.loads(txt)
+    # Chuẩn hóa chữ cái đầu
+    text_clean = text_en[0].lower() + text_en[1:] if len(text_en) > 1 else text_en.lower()
+    
+    # Kiểm tra xem đã có prefix mô tả góc quay chưa
+    prefixes = ("a shot of", "a medium shot", "a close-up", "a wide angle", "a wide shot",
+                "an aerial", "a first-person", "in this frame", "a split-screen", "a view of")
+    if any(text_clean.startswith(p) for p in prefixes):
+        return text_en[0].upper() + text_en[1:]
+
+    # Thêm prefix chuẩn theo văn phong của mô hình Captioning
+    return f"A shot of {text_clean}"
+
+
+def _gemini_process_query(text_vi: str) -> dict:
+    """Dùng Gemini phân tích mở rộng query theo phong cách video captioning chuẩn."""
+    import json
+    if os.environ.get("GEMINI_API_KEY"):
+        try:
+            from google import genai
+            client = genai.Client()
+            prompt = (
+                "You are an expert in AI Challenge Video Retrieval.\n"
+                "Convert this Vietnamese search query into an expanded Video Caption description matching video dataset style.\n"
+                "Dataset caption style examples:\n"
+                "- 'A medium shot of a news studio with two news anchors standing behind a white desk...'\n"
+                "- 'A close-up shot of a chef preparing ingredients in a kitchen with cooking utensils...'\n"
+                "- 'An aerial wide shot of a river with boats moving on water at sunset...'\n\n"
+                f"Vietnamese Query: \"{text_vi}\"\n\n"
+                "Output ONLY a JSON object with these keys:\n"
+                "- text_en: Detailed English description in caption style starting with 'A shot of / A medium shot of / A close-up shot of'\n"
+                "- expanded_vi: List of 4-6 Vietnamese synonyms and related keywords\n"
+                "- expanded_en: List of 4-6 English synonyms and visual elements\n\n"
+                "JSON format:"
+            )
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt,
+            )
+            txt = response.text.strip()
+            if txt.startswith("```"):
+                txt = re.sub(r"^```[a-zA-Z]*\n", "", txt)
+                txt = re.sub(r"\n```$", "", txt)
+            return json.loads(txt)
+        except Exception as e:
+            logger.warning("Gemini query processing failed: %s", e)
+
+    # Fallback khi offline hoặc không có API key
+    text_en = _gemini_translate(text_vi)
+    return {
+        "text_en": text_en,
+        "expanded_vi": [],
+        "expanded_en": [],
+    }
 
 
 def _gemini_translate(text_vi: str) -> str:
-    """Dịch tiếng Việt → tiếng Anh bằng Gemini API."""
-    from google import genai
+    """Dịch tiếng Việt → tiếng Anh theo phong cách caption của tập dữ liệu."""
+    # 1. Thử Google Gemini nếu có API key
+    if os.environ.get("GEMINI_API_KEY"):
+        try:
+            from google import genai
+            client = genai.Client()
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=(
+                    "Translate the following Vietnamese video retrieval query into a detailed visual caption in English. "
+                    "Format in dataset caption style starting with 'A shot of / A medium shot of / A close-up shot of' "
+                    "describing the visual scene, subjects, and actions. Output ONLY the English caption.\n\n"
+                    f"{text_vi}"
+                ),
+            )
+            if response.text:
+                return response.text.strip()
+        except Exception:
+            pass
 
-    client = genai.Client()
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=(
-            "Translate the following Vietnamese text to English. "
-            "Keep all details including colors, numbers, negations, "
-            "temporal relationships, and proper nouns. "
-            "Output ONLY the English translation, nothing else.\n\n"
-            f"{text_vi}"
-        ),
-    )
-    return response.text.strip()
+    # 2. Thử deep_translator (miễn phí, không cần API key, cực nhanh)
+    try:
+        from deep_translator import GoogleTranslator
+        raw_en = GoogleTranslator(source="vi", target="en").translate(text_vi)
+        if raw_en:
+            return _format_as_caption(raw_en.strip())
+    except Exception as e:
+        logger.debug("deep_translator failed: %s", e)
+
+    return _format_as_caption(text_vi)
 
 
 def make_query(

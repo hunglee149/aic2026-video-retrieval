@@ -246,14 +246,20 @@ class ObjectFilter:
 
 
 def build_object_filter(
-    index_dir: str | Path = "local/index",
+    index_path: str | Path = "local/objects_index.pkl",
     confidence_threshold: float = 0.4,
 ) -> ObjectFilter:
-    """Factory function — tạo ObjectFilter từ file objects_index.pkl."""
-    index_dir = Path(index_dir)
-    pkl_path = index_dir / "objects_index.pkl"
+    """Factory function — tạo ObjectFilter từ file objects_index.pkl hoặc thư mục."""
+    p = Path(index_path)
+    if p.is_dir():
+        pkl_path = p / "objects_index.pkl"
+        obj_dir = p / "objects"
+    else:
+        pkl_path = p
+        obj_dir = p.parent / "objects"
+
     return ObjectFilter(
         index_path=pkl_path if pkl_path.exists() else None,
-        objects_dir=index_dir.parent / "objects",
+        objects_dir=obj_dir,
         confidence_threshold=confidence_threshold,
     )
