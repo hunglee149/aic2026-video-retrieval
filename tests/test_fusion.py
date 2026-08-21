@@ -27,7 +27,7 @@ def test_fuse_honours_limit():
     second = make_candidate("L22_V002", 200, 0.7)
     third = make_candidate("L23_V003", 300, 0.6)
 
-    result = rank.fuse([[first, second], [third]], limit=2)
+    result = rank.fuse([[first, second, third]], limit=2)
 
     assert result == [first, second]
 
