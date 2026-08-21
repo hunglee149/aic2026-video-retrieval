@@ -520,7 +520,7 @@ function confirmSelection() {
   const c = state.candidates[state.selected];
   const frameInput = parseInt($('frame-input').value, 10);
   const frame = isNaN(frameInput) ? (c.representative_frames[0] ?? c.start_frame) : frameInput;
-  const answer = $('answer-input').value.trim();
+  const answer = $('answer-input') ? $('answer-input').value.trim() : '';
   const queryId = $('query-id-input').value.trim() || 'q1';
 
   const existing = state.selections.findIndex(s => s.video_id === c.video_id && s.queryId === queryId);
@@ -528,7 +528,42 @@ function confirmSelection() {
 
   state.selections.push({ video_id: c.video_id, frames: [frame], answer, queryId, task: state.task, rank: c.rank });
   renderSelectionsList();
-  toast(`Đã thêm ${c.video_id} frame ${frame}`, 'success');
+  toast(`Đã thêm #${c.rank} ${c.video_id} frame ${frame}`, 'success');
+}
+
+function addAllTopKToExport() {
+  if (!state.candidates || !state.candidates.length) {
+    toast('Chưa có kết quả tìm kiếm nào!', 'warning');
+    return;
+  }
+  const queryId = $('query-id-input').value.trim() || 'q1';
+  const answer = ($('answer-input') ? $('answer-input').value.trim() : '');
+
+  // Lọc bỏ các kết quả cũ của câu queryId này (để nạp danh sách mới nhất)
+  state.selections = state.selections.filter(s => s.queryId !== queryId);
+
+  // Thêm toàn bộ candidates theo đúng thứ tự xếp hạng (tối đa 100)
+  state.candidates.forEach((c, idx) => {
+    let frame;
+    // Nếu ứng viên đang được chọn và người dùng đã chỉnh ô frame-input thì lấy frame người dùng chọn
+    if (state.selected === idx && $('frame-input').value) {
+      const parsed = parseInt($('frame-input').value, 10);
+      frame = isNaN(parsed) ? (c.representative_frames[0] ?? c.start_frame) : parsed;
+    } else {
+      frame = c.representative_frames[0] ?? c.start_frame;
+    }
+    state.selections.push({
+      video_id: c.video_id,
+      frames: [frame],
+      answer: answer,
+      queryId: queryId,
+      task: state.task,
+      rank: c.rank || (idx + 1),
+    });
+  });
+
+  renderSelectionsList();
+  toast(`⚡ Đã đưa toàn bộ ${state.candidates.length} kết quả vào Export cho ${queryId}!`, 'success');
 }
 
 function removeSelection(idx) {
@@ -764,6 +799,16 @@ function removeExportRow(idx) {
   state.selections.splice(idx, 1);
   renderSelectionsList();
   renderExportTable();
+}
+
+function clearAllSelections() {
+  if (!state.selections.length) return;
+  if (confirm('Bạn có chắc chắn muốn xóa toàn bộ các lựa chọn đã lưu?')) {
+    state.selections = [];
+    renderSelectionsList();
+    renderExportTable();
+    toast('Đã xóa toàn bộ lựa chọn', 'info');
+  }
 }
 
 function refreshPreview() {

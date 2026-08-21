@@ -207,10 +207,13 @@
             <textarea id="answer-input" placeholder="Nhập câu trả lời..."></textarea>
           </div>
 
-          <!-- Confirm button -->
-          <div class="detail-section">
+          <!-- Confirm buttons -->
+          <div class="detail-section" style="display:flex;gap:8px;flex-direction:column;">
             <button class="btn btn-primary btn-sm" id="btn-confirm-selection" onclick="confirmSelection()" disabled>
-              ✓ Xác nhận lựa chọn
+              ✓ Xác nhận lựa chọn này
+            </button>
+            <button class="btn btn-secondary btn-sm" id="btn-add-all-topk" onclick="addAllTopKToExport()" title="Đưa toàn bộ danh sách xếp hạng (Top 100) vào tab Export" style="border-color:rgba(124,58,237,0.4);color:var(--purple-light)">
+              ⚡ Lấy toàn bộ Top 100 vào Export
             </button>
           </div>
 
@@ -367,6 +370,7 @@
             <h2>Tóm tắt kết quả</h2>
             <div class="topbar-spacer"></div>
             <span class="badge badge-gray" id="export-query-count">0 queries</span>
+            <button class="btn btn-secondary btn-sm" onclick="clearAllSelections()" style="margin-left:8px;color:var(--red);border-color:rgba(239,68,68,0.3);font-size:11px;padding:3px 8px;" title="Xóa toàn bộ lựa chọn">🗑️ Xóa tất cả</button>
           </div>
           <div class="export-card-body">
             <div id="export-alert"></div>
