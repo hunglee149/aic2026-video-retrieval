@@ -463,6 +463,9 @@ input[type="range"]::-webkit-slider-thumb {
   cursor: pointer;
   transition: var(--transition);
   position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 220px;
 }
 .candidate-card:hover {
   border-color: rgba(124,58,237,0.35);
@@ -481,8 +484,10 @@ input[type="range"]::-webkit-slider-thumb {
 .card-thumb {
   position: relative;
   aspect-ratio: 16/9;
+  width: 100%;
   overflow: hidden;
   background: #111827;
+  flex-shrink: 0;
 }
 .card-thumb img {
   width: 100%; height: 100%;
@@ -572,9 +577,10 @@ input[type="range"]::-webkit-slider-thumb {
   display: grid;
   grid-template-columns: 160px 1fr auto;
   align-items: stretch;
+  min-height: unset;
 }
-#candidates-grid.list-mode .card-thumb { aspect-ratio: unset; height: 90px; }
-#candidates-grid.list-mode .card-body { padding: 10px 14px; }
+#candidates-grid.list-mode .card-thumb { aspect-ratio: unset; height: 90px; width: 160px; }
+#candidates-grid.list-mode .card-body { padding: 10px 14px; flex: 1; }
 #candidates-grid.list-mode .verdict-row {
   flex-direction: column;
   border-top: none;
@@ -793,23 +799,28 @@ input[type="range"]::-webkit-slider-thumb {
   flex: 1;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding: 20px;
   gap: 16px;
 }
 
 #iter-preview {
-  flex: 1;
-  max-height: 340px;
+  width: 100%;
   background: #0d1117;
   border-radius: var(--radius-lg);
   overflow: hidden;
   border: 1px solid var(--border);
   position: relative;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 #iter-preview img {
-  width: 100%; height: 100%;
-  object-fit: cover;
+  width: 100%; 
+  height: auto;
+  display: block;
 }
 
 .iter-meta {

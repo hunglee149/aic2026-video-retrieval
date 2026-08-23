@@ -75,58 +75,60 @@ class TextRetriever:
         else:
             self.documents = all_documents
             self.tokenized = all_tokenized
-
-        logger.info("  → %d documents loaded (types: %s)",
-                     len(self.documents),
-                     doc_types or "all")
-
-        # Pre-compute BM25 statistics
-        self._build_bm25()
+        
+        logger.info("  → %d text documents loaded", len(self.documents))
+        
+        bm25_cache_path = self.index_path.with_name("bm25_index.pkl")
+        if bm25_cache_path.exists():
+            logger.info("Loading pre-built BM25 index from %s", bm25_cache_path)
+            with open(bm25_cache_path, "rb") as f:
+                bm25_data = pickle.load(f)
+                self.doc_lengths = bm25_data["doc_lengths"]
+                self.avgdl = bm25_data["avgdl"]
+                self.idf = bm25_data["idf"]
+                self.inverted = bm25_data["inverted"]
+                self.N = len(self.documents)
+            logger.info("  → BM25 index loaded instantly.")
+        else:
+            self._build_bm25()
+            
+            logger.info("Saving BM25 index to %s", bm25_cache_path)
+            try:
+                with open(bm25_cache_path, "wb") as f:
+                    pickle.dump({
+                        "doc_lengths": self.doc_lengths,
+                        "avgdl": self.avgdl,
+                        "idf": self.idf,
+                        "inverted": dict(self.inverted)
+                    }, f)
+            except Exception as e:
+                logger.warning("Failed to save BM25 cache: %s", e)
 
     def _build_bm25(self):
         """Pre-compute IDF and document lengths for BM25."""
+        logger.info("Building BM25 index from scratch (this may take ~50s)...")
         self.N = len(self.documents)
-        self.avgdl = sum(len(t) for t in self.tokenized) / max(self.N, 1)
+        self.doc_lengths = [len(t) for t in self.tokenized]
+        self.avgdl = sum(self.doc_lengths) / max(self.N, 1)
 
         # Document frequency: how many docs contain each term
         self.df = Counter()
         for tokens in self.tokenized:
-            unique_terms = set(tokens)
-            for term in unique_terms:
-                self.df[term] += 1
+            self.df.update(set(tokens))
 
-        # Pre-compute IDF
+        # Compute IDF
         self.idf = {}
-        for term, freq in self.df.items():
-            self.idf[term] = math.log((self.N - freq + 0.5) / (freq + 0.5) + 1)
+        for term, df in self.df.items():
+            self.idf[term] = math.log((self.N - df + 0.5) / (df + 0.5) + 1.0)
 
-        # Inverted index for fast lookup
-        self.inverted = defaultdict(list)
-        for i, tokens in enumerate(self.tokenized):
+        # Build inverted index
+        self.inverted: dict[str, list[tuple[int, int]]] = defaultdict(list)
+        for doc_idx, tokens in enumerate(self.tokenized):
             tf = Counter(tokens)
             for term, count in tf.items():
-                self.inverted[term].append((i, count))
+                self.inverted[term].append((doc_idx, count))
 
         logger.info("  → BM25 index built: %d unique terms", len(self.df))
-
-    def _bm25_score(self, query_tokens: list[str], doc_idx: int, k1=1.5, b=0.75) -> float:
-        """Compute BM25 score for a single document."""
-        doc_tokens = self.tokenized[doc_idx]
-        dl = len(doc_tokens)
-        tf = Counter(doc_tokens)
-
-        score = 0.0
-        for qt in query_tokens:
-            if qt not in self.idf:
-                continue
-            term_freq = tf.get(qt, 0)
-            if term_freq == 0:
-                continue
-            idf = self.idf[qt]
-            tf_norm = (term_freq * (k1 + 1)) / (term_freq + k1 * (1 - b + b * dl / self.avgdl))
-            score += idf * tf_norm
-
-        return score
 
     def search(
         self,
@@ -148,51 +150,47 @@ class TextRetriever:
         if not query_tokens:
             return []
 
-        # Find candidate documents using inverted index
-        candidate_docs = set()
+        # Accumulate scores for each document efficiently
+        scores = defaultdict(float)
+        k1 = 1.5
+        b = 0.75
+        avgdl = self.avgdl
+        
         for qt in query_tokens:
-            if qt in self.inverted:
-                for doc_idx, _ in self.inverted[qt]:
-                    candidate_docs.add(doc_idx)
+            if qt not in self.inverted:
+                continue
+            idf = self.idf.get(qt, 0.0)
+            if idf <= 0.0:
+                continue
+                
+            for doc_idx, count in self.inverted[qt]:
+                dl = self.doc_lengths[doc_idx]
+                tf_norm = (count * (k1 + 1)) / (count + k1 * (1 - b + b * dl / avgdl))
+                scores[doc_idx] += idf * tf_norm
 
-        # Score candidate documents
-        scored = []
-        for doc_idx in candidate_docs:
+        # Group by video, keep best score per video
+        video_best: dict[str, tuple[float, dict]] = {}
+        for doc_idx, score in scores.items():
             doc = self.documents[doc_idx]
             vid = doc.get("video_id", "")
-            if vid in exclude:
+            if not vid or vid in exclude:
                 continue
-            score = self._bm25_score(query_tokens, doc_idx)
-            if score > 0:
-                scored.append((doc_idx, score))
-
-        # Sort by score descending
-        scored.sort(key=lambda x: x[1], reverse=True)
-
-        # Convert to Candidates — group by video, keep best score per video
-        video_best: dict[str, tuple[float, dict]] = {}
-        for doc_idx, score in scored:
-            doc = self.documents[doc_idx]
-            vid = doc["video_id"]
-
             if vid not in video_best or score > video_best[vid][0]:
                 video_best[vid] = (score, doc)
 
-        # Normalize scores to [0, 1]
-        if video_best:
-            max_score = max(s for s, _ in video_best.values())
-        else:
-            max_score = 1.0
+        if not video_best:
+            return []
 
+        # Normalize scores to [0, 1]
+        max_score = max(s for s, _ in video_best.values())
+        
         candidates = []
         for vid, (score, doc) in sorted(video_best.items(), key=lambda x: x[1][0], reverse=True):
             norm_score = score / max_score if max_score > 0 else 0.0
 
-            # Get frame info from document
             kf_num = doc.get("keyframe_num", 0)
-            frame_idx = kf_num  # keyframe_num as proxy for frame position
+            frame_idx = kf_num
 
-            # Build evidence
             evidence = {}
             doc_type = doc.get("type", "")
             text_snippet = doc.get("text", "")[:200]
@@ -214,10 +212,9 @@ class TextRetriever:
                 )
             )
 
-            if len(candidates) >= k:
-                break
+        return candidates[:k]
 
-        return candidates
+
 
     @property
     def num_documents(self) -> int:

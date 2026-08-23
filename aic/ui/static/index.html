@@ -53,6 +53,7 @@
           <label class="label" for="query-input">Câu hỏi (Tiếng Việt)</label>
           <textarea id="query-input" rows="4"
             placeholder="Nhập mô tả cảnh cần tìm...&#10;Ví dụ: Người phụ nữ mặc áo đỏ đang đi dạo trong công viên lúc hoàng hôn"></textarea>
+          <input type="file" id="query-file-upload" accept=".txt" onchange="handleQueryFileUpload(event)" style="margin-top: 8px; font-size: 12px; color: var(--text-muted); width: 100%;" />
         </div>
 
         <div class="sidebar-section">
@@ -118,14 +119,6 @@
           <span class="badge badge-purple" id="results-count">0 candidates</span>
           <span class="badge badge-gray" id="results-task-badge">KIS</span>
           <div class="results-header-spacer"></div>
-          <div class="view-toggle">
-            <button class="view-toggle-btn active" id="btn-grid-view" onclick="setGridMode(true)" title="Grid view">
-              <svg width="14" height="14" fill="currentColor" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
-            </button>
-            <button class="view-toggle-btn" id="btn-list-view" onclick="setGridMode(false)" title="List view">
-              <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
-            </button>
-          </div>
         </div>
 
         <div id="candidates-grid">
@@ -154,6 +147,7 @@
               <span>Chọn một candidate</span>
             </div>
             <img id="preview-img" src="" alt="" style="display:none"/>
+            <video id="preview-vid" controls style="display:none; width: 100%; border-radius: 8px; background: #000; aspect-ratio: 16/9;"></video>
           </div>
 
           <!-- Scores -->
@@ -241,7 +235,7 @@
               </svg>
               <span>Nhấn "Bắt đầu" để tìm kiếm vòng lặp</span>
             </div>
-            <img id="iter-preview-img" src="" alt="" style="display:none;width:100%;height:100%;object-fit:cover"/>
+            <img id="iter-preview-img" src="" alt="" style="display:none;width:100%;height:100%;object-fit:contain;background-color:#000;"/>
           </div>
 
           <div class="iter-meta">
@@ -420,6 +414,6 @@
 <!-- Toast container -->
 <div id="toast-container"></div>
 
-<script src="/static/main.js"></script>
+<script src="/static/main.js?v=6"></script>
 </body>
 </html>

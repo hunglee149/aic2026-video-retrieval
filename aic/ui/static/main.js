@@ -274,13 +274,45 @@ function selectCandidate(idx) {
 
   const frameIdx = c.representative_frames[0] ?? c.start_frame;
   const img = $('preview-img');
+  const vid = $('preview-vid');
   const placeholder = $('preview-placeholder');
+  
   img.style.display = 'none';
+  if (vid) vid.style.display = 'none';
   placeholder.style.display = 'flex';
-  img.onload = () => { img.style.display = 'block'; placeholder.style.display = 'none'; };
-  img.onerror = () => { img.style.display = 'none'; placeholder.style.display = 'flex'; };
-  img.src = keyframeUrl(c.video_id, frameIdx);
-  img.alt = c.video_id;
+  
+  if (vid) {
+    // Hiển thị Video, fallback sang keyframe nếu video lỗi
+    vid.src = `/api/video/${c.video_id}`;
+    vid.onloadeddata = async () => {
+      vid.style.display = 'block';
+      placeholder.style.display = 'none';
+      img.style.display = 'none';
+      
+      // Tìm FPS để seek
+      try {
+        const res = await fetch(`/api/video_info/${c.video_id}`);
+        if (res.ok) {
+          const data = await res.json();
+          state.currentFps = data.fps;
+          vid.currentTime = Math.max(0, frameIdx - 1) / data.fps;
+        }
+      } catch (e) {
+        console.warn('Cannot fetch video info:', e);
+      }
+    };
+    vid.onerror = () => {
+      vid.style.display = 'none';
+      // Load ảnh keyframe thay thế
+      img.onload = () => { img.style.display = 'block'; placeholder.style.display = 'none'; };
+      img.onerror = () => { img.style.display = 'none'; placeholder.style.display = 'flex'; };
+      img.src = keyframeUrl(c.video_id, frameIdx);
+    };
+  } else {
+    img.onload = () => { img.style.display = 'block'; placeholder.style.display = 'none'; };
+    img.onerror = () => { img.style.display = 'none'; placeholder.style.display = 'flex'; };
+    img.src = keyframeUrl(c.video_id, frameIdx);
+  }
 
   $('detail-rank-badge').textContent = `#${c.rank}`;
 
@@ -298,12 +330,7 @@ function selectCandidate(idx) {
   }
 
   const evidenceSection = $('detail-evidence-section');
-  if (c.evidence && Object.keys(c.evidence).length) {
-    evidenceSection.style.display = '';
-    $('detail-evidence-text').textContent = JSON.stringify(c.evidence, null, 2);
-  } else {
-    evidenceSection.style.display = 'none';
-  }
+  if (evidenceSection) evidenceSection.style.display = 'none';
 
   $('frame-input').value = frameIdx;
   $('btn-confirm-selection').disabled = false;
@@ -578,21 +605,20 @@ function refreshPreview() {
 
 async function doExport() {
   if (!state.selections.length) { toast('Chưa có lựa chọn để export', 'warning'); return; }
-  const exportQueryId = $('export-query-id').value.trim() || $('query-id-input').value.trim() || 'q1';
-  const rows = state.selections.map(s => ({ video_id: s.video_id, frames: s.frames, answer: s.answer || '' }));
+  const rows = state.selections.map(s => ({ query_id: s.queryId || 'q1', video_id: s.video_id, frames: s.frames, answer: s.answer || '' }));
 
   setLoading('btn-export', true);
   try {
     const res = await fetch('/api/export', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query_id: exportQueryId, task: state.task, rows }),
+      body: JSON.stringify({ task: state.task, rows }),
     });
     if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Export failed'); }
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = `${exportQueryId}.zip`;
+    a.href = url; a.download = `submission.zip`;
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
     toast('Đã tải xuống submission.zip', 'success');
@@ -659,4 +685,59 @@ document.addEventListener('DOMContentLoaded', () => {
   $('query-id-input').addEventListener('input', () => {
     $('export-query-id').value = $('query-id-input').value;
   });
+
+  const vid = $('preview-vid');
+  if (vid) {
+    vid.addEventListener('timeupdate', () => {
+      if (vid.style.display !== 'none' && !vid.paused && document.activeElement !== $('frame-input')) {
+        const fps = state.currentFps || 25;
+        const currentFrame = Math.round(vid.currentTime * fps) + 1;
+        $('frame-input').value = currentFrame;
+      }
+    });
+    vid.addEventListener('seeked', () => {
+      if (vid.style.display !== 'none' && document.activeElement !== $('frame-input')) {
+        const fps = state.currentFps || 25;
+        const currentFrame = Math.round(vid.currentTime * fps) + 1;
+        $('frame-input').value = currentFrame;
+      }
+    });
+  }
+
+  const frameInput = $('frame-input');
+  if (frameInput) {
+    frameInput.addEventListener('input', (e) => {
+      const frame = parseInt(e.target.value, 10);
+      if (!isNaN(frame) && vid && vid.style.display !== 'none') {
+        const fps = state.currentFps || 25;
+        vid.currentTime = Math.max(0, frame - 1) / fps;
+      }
+    });
+  }
 });
+
+// Xử lý upload file txt query
+function handleQueryFileUpload(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+
+  const fileNameWithoutExt = file.name.replace(/\.[^/.]+$/, "");
+  const queryIdInput = document.getElementById('query-id-input');
+  if (queryIdInput) {
+    queryIdInput.value = fileNameWithoutExt;
+    const exportQueryId = document.getElementById('export-query-id');
+    if (exportQueryId) exportQueryId.value = fileNameWithoutExt;
+  }
+
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    const text = e.target.result;
+    const queryInput = document.getElementById('query-input');
+    if (queryInput) {
+      queryInput.value = text;
+      queryInput.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    event.target.value = '';
+  };
+  reader.readAsText(file);
+}
