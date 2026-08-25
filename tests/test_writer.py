@@ -6,7 +6,7 @@ import pytest
 
 from aic.submission import writer
 from aic.submission.query_pack import QueryDefinition
-from aic.submission.validator import SubmissionValidationError
+from aic.submission.validator import GeneratedArchiveError, SubmissionValidationError
 
 
 MANIFEST = [
@@ -124,6 +124,49 @@ def test_write_validated_submission_reparses_a_valid_mixed_task_zip(tmp_path):
         assert list(csv.reader(io.StringIO(
             archive.read("submission/pack1_q3_trake.csv").decode("utf-8")
         ))) == [["L21_V003", "10", "20", "30"]]
+
+
+def test_write_validated_submission_raises_for_a_bom_written_after_input_validation(
+    tmp_path, monkeypatch
+):
+    def write_bom_submission(rows_by_query, out_path):
+        with zipfile.ZipFile(out_path, "w") as archive:
+            for query_id, csv_rows in rows_by_query.items():
+                buffer = io.StringIO(newline="")
+                csv.writer(buffer).writerows(csv_rows)
+                raw = buffer.getvalue().encode("utf-8")
+                if query_id == "pack1_q1_kis":
+                    raw = b"\xef\xbb\xbf" + raw
+                archive.writestr(f"submission/{query_id}.csv", raw)
+
+    monkeypatch.setattr(writer, "write_submission", write_bom_submission)
+    rows = [
+        {
+            "query_id": "pack1_q1_kis",
+            "video_id": "L21_V001",
+            "frames": [712],
+            "answer": "",
+        },
+        {
+            "query_id": "pack1_q2_qa",
+            "video_id": "L21_V002",
+            "frames": [713],
+            "answer": "Hai người",
+        },
+        {
+            "query_id": "pack1_q3_trake",
+            "video_id": "L21_V003",
+            "frames": [10, 20, 30],
+            "answer": "",
+        },
+    ]
+
+    with pytest.raises(GeneratedArchiveError) as error:
+        writer.write_validated_submission(MANIFEST, rows, tmp_path / "submission.zip")
+
+    assert "invalid_csv_encoding" in [
+        issue.code for issue in error.value.report.errors
+    ]
 
 
 def test_write_submission_supports_multiple_queries_and_creates_parent(tmp_path):

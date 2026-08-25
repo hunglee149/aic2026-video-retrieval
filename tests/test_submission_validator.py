@@ -1,5 +1,12 @@
+import io
+import zipfile
+
 from aic.submission.query_pack import QueryDefinition
-from aic.submission.validator import normalize_submission_rows, validate_submission
+from aic.submission.validator import (
+    normalize_submission_rows,
+    validate_submission,
+    validate_submission_zip,
+)
 
 
 MANIFEST = [
@@ -63,6 +70,18 @@ def test_valid_rows_keep_qa_whitespace_and_normalize_terminal_mp4_suffix():
     assert normalized[0]["video_id"] == "L01_V001"
     assert normalized[1]["video_id"] == "L01_V002"
     assert normalized[1]["answer"] == "  Năm người  "
+
+
+def test_zip_validation_accepts_expected_paths_in_reverse_member_order():
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("submission/query-p1-3-trake.csv", "L01_V001,10,20,30\r\n")
+        archive.writestr("submission/query-p1-2-qa.csv", "L01_V001,34,Năm người\r\n")
+        archive.writestr("submission/query-p1-1-kis.csv", "L01_V001,12\r\n")
+
+    report = validate_submission_zip(buffer.getvalue(), MANIFEST)
+
+    assert report.ok
 
 
 def test_requires_rows_for_every_manifest_query():

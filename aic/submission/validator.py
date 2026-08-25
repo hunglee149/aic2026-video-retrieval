@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+from collections import Counter
 from dataclasses import dataclass, field
 import io
 from pathlib import Path
@@ -127,7 +128,7 @@ def validate_submission_zip(
     parsed_rows: list[dict] = []
     with archive:
         actual_names = archive.namelist()
-        if actual_names != expected_names:
+        if Counter(actual_names) != Counter(expected_names):
             report.errors.append(
                 ValidationIssue(
                     "archive_paths_mismatch",
