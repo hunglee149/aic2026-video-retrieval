@@ -24,7 +24,16 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+# Load .env manually if exists (no dotenv dependency required)
+env_path = Path(".env")
+if env_path.exists():
+    for _line in env_path.read_text(encoding="utf-8").splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _v = _line.split("=", 1)
+            os.environ[_k.strip()] = _v.strip().strip("'\"")
+
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -46,7 +55,8 @@ logger = logging.getLogger(__name__)
 KEYFRAMES_DIR = Path(os.environ.get("AIC_KEYFRAMES_DIR", "data/keyframes"))
 INDEX_PATH = Path(os.environ.get("AIC_INDEX_PATH", "local/clip_faiss.index"))
 META_PATH = Path(os.environ.get("AIC_META_PATH", "local/clip_metadata.json"))
-USE_DUMMY = os.environ.get("AIC_USE_DUMMY", "1") == "1"
+TEXT_INDEX_PATH = Path(os.environ.get("AIC_TEXT_INDEX_PATH", "data/input/input/index/text_search_index.pkl"))
+USE_DUMMY = os.environ.get("AIC_USE_DUMMY", "0") == "1"
 
 # ---------------------------------------------------------------------------
 # App
@@ -61,27 +71,44 @@ STATIC_DIR = Path(__file__).parent / "static"
 # Lazy retriever loader
 # ---------------------------------------------------------------------------
 
-_retriever = None
+import threading
 
+_retrievers = []
+_retriever_lock = threading.Lock()
 
-def get_retriever():
-    global _retriever
-    if _retriever is not None:
-        return _retriever
-    if USE_DUMMY:
-        logger.info("Using dummy retriever (set AIC_USE_DUMMY=0 for CLIP)")
-        _retriever = dummy
-        return _retriever
-    try:
-        from ..retrieval.clip import build_clip_retriever
-
-        logger.info("Loading CLIP retriever...")
-        _retriever = build_clip_retriever(INDEX_PATH, META_PATH)
-        logger.info("CLIP retriever ready.")
-    except Exception as e:
-        logger.warning("CLIP load failed (%s), falling back to dummy", e)
-        _retriever = dummy
-    return _retriever
+def get_retrievers():
+    global _retrievers
+    with _retriever_lock:
+        if _retrievers:
+            return _retrievers
+        if USE_DUMMY:
+            logger.info("Using dummy retriever (set AIC_USE_DUMMY=0 for CLIP)")
+            _retrievers = [dummy]
+            return _retrievers
+            
+        try:
+            from ..retrieval.clip import build_clip_retriever
+            logger.info("Loading CLIP retriever...")
+            clip_retriever = build_clip_retriever(INDEX_PATH, META_PATH)
+            _retrievers.append(clip_retriever)
+            logger.info("CLIP retriever ready.")
+        except Exception as e:
+            logger.warning("CLIP load failed (%s), falling back to dummy", e)
+            _retrievers.append(dummy)
+            
+        try:
+            from ..retrieval.text_retriever import TextRetriever
+            if TEXT_INDEX_PATH.exists():
+                logger.info("Loading Text retriever (BM25)...")
+                text_retriever = TextRetriever(TEXT_INDEX_PATH, name="bm25")
+                _retrievers.append(text_retriever)
+                logger.info("Text retriever ready.")
+            else:
+                logger.warning("Text index not found at %s", TEXT_INDEX_PATH)
+        except Exception as e:
+            logger.warning("Text retriever load failed: %s", e)
+            
+        return _retrievers
 
 
 # ---------------------------------------------------------------------------
@@ -104,13 +131,13 @@ class TranslateRequest(BaseModel):
 
 
 class ExportRow(BaseModel):
+    query_id: str
     video_id: str
     frames: list[int]
     answer: str = ""
 
 
 class ExportRequest(BaseModel):
-    query_id: str
     task: str = "kis"
     rows: list[ExportRow]
 
@@ -151,15 +178,21 @@ def _candidate_to_out(cand: Candidate, rank: int) -> dict:
 
 @app.get("/api/status")
 def status():
-    retriever = get_retriever()
-    retriever_name = getattr(retriever, "NAME", getattr(retriever, "name", "unknown"))
-    if hasattr(retriever, "num_vectors"):
-        retriever_name = f"CLIP ({retriever.num_vectors:,} vectors)"
-    elif retriever is dummy:
-        retriever_name = "dummy"
+    retrievers = get_retrievers()
+    retriever_names = []
+    for r in retrievers:
+        name = getattr(r, "NAME", getattr(r, "name", "unknown"))
+        if hasattr(r, "num_vectors"):
+            name = f"CLIP ({r.num_vectors:,} vectors)"
+        elif hasattr(r, "num_documents"):
+            name = f"BM25 ({r.num_documents:,} docs)"
+        elif r is dummy:
+            name = "dummy"
+        retriever_names.append(name)
+        
     return {
         "ok": True,
-        "retriever": retriever_name,
+        "retriever": " + ".join(retriever_names),
         "keyframes_dir": str(KEYFRAMES_DIR),
         "use_dummy": USE_DUMMY,
     }
@@ -168,10 +201,15 @@ def status():
 @app.post("/api/translate")
 def translate(req: TranslateRequest):
     """Dịch câu hỏi tiếng Việt → tiếng Anh qua Gemini."""
+    import os
+    if not os.environ.get("GEMINI_API_KEY"):
+        return {"text_en": req.text_vi, "ok": False, "error": "Chưa cài đặt biến môi trường GEMINI_API_KEY"}
+        
     q = make_query("_tmp", text_vi=req.text_vi)
+    from ..core.query_processor import _gemini_translate
     try:
-        q = translate_query(q)
-        return {"text_en": q.text_en, "ok": True}
+        text_en = _gemini_translate(req.text_vi)
+        return {"text_en": text_en, "ok": True}
     except Exception as e:
         logger.warning("Translation error: %s", e)
         return {"text_en": req.text_vi, "ok": False, "error": str(e)}
@@ -180,7 +218,9 @@ def translate(req: TranslateRequest):
 @app.post("/api/search")
 def search(req: SearchRequest):
     """Tìm kiếm candidates bằng retriever hiện tại."""
-    retriever = get_retriever()
+    retrievers = get_retrievers()
+    from ..core.query_processor import process_query
+    
     query = make_query(
         query_id=req.query_id,
         text_vi=req.text_vi,
@@ -188,12 +228,16 @@ def search(req: SearchRequest):
         task=req.task,
         n_events=req.n_events,
     )
+    
+    # Bật lại LLM Gemini để kết quả tốt hơn (dịch + synonyms)
+    query = process_query(query)
+    
     exclude = frozenset(req.exclude)
 
     try:
         candidates = retrieve_and_fuse(
             query=query,
-            retrievers=[retriever],
+            retrievers=retrievers,
             fuse_fn=fuse,
             limit=req.k,
             exclude=exclude,
@@ -209,21 +253,49 @@ def search(req: SearchRequest):
     }
 
 
+_frame_to_n = None
+
+def _get_frame_mapping():
+    global _frame_to_n
+    if _frame_to_n is not None:
+        return _frame_to_n
+    
+    retrievers = get_retrievers()
+    _frame_to_n = {}
+    for retriever in retrievers:
+        if hasattr(retriever, "metadata") and retriever.metadata:
+            for meta in retriever.metadata:
+                vid = meta.get("video_id")
+                fidx = meta.get("frame_idx")
+                n = meta.get("keyframe_num")
+                if vid is not None and fidx is not None and n is not None:
+                    _frame_to_n[(vid, fidx)] = n
+    return _frame_to_n
+
+
 @app.get("/api/keyframe/{video_id}/{frame_idx}")
 def get_keyframe(video_id: str, frame_idx: int):
-    """Trả về ảnh keyframe từ thư mục data/keyframes.
+    """Trả về ảnh keyframe từ thư mục data/keyframes."""
+    candidates = []
+    
+    mapping = _get_frame_mapping()
+    n = mapping.get((video_id, frame_idx))
+    
+    if n is not None:
+        candidates.extend([
+            KEYFRAMES_DIR / video_id / f"{n:03d}.jpg",
+            KEYFRAMES_DIR / video_id / f"{n:04d}.jpg",
+            KEYFRAMES_DIR / video_id / f"{n}.jpg",
+            KEYFRAMES_DIR / video_id / f"{n:03d}.png",
+            KEYFRAMES_DIR / video_id / f"{n:04d}.png",
+        ])
 
-    Cấu trúc thư mục kỳ vọng:
-        data/keyframes/{video_id}/{frame_idx:06d}.jpg
-    hoặc:
-        data/keyframes/{video_id}/{frame_idx}.jpg
-    """
-    candidates = [
+    candidates.extend([
         KEYFRAMES_DIR / video_id / f"{frame_idx:06d}.jpg",
         KEYFRAMES_DIR / video_id / f"{frame_idx}.jpg",
         KEYFRAMES_DIR / video_id / f"{frame_idx:06d}.png",
         KEYFRAMES_DIR / video_id / f"{frame_idx}.png",
-    ]
+    ])
     for p in candidates:
         if p.exists():
             suffix = p.suffix.lower()
@@ -249,30 +321,124 @@ def get_keyframe(video_id: str, frame_idx: int):
     return Response(content=svg.encode(), media_type="image/svg+xml")
 
 
+_video_paths = {}
+
+def _get_video_path(video_id: str):
+    if video_id in _video_paths and _video_paths[video_id].exists():
+        return _video_paths[video_id]
+        
+    # Tìm kiếm nhanh theo cấu trúc thư mục thực tế để tránh treo server
+    # Cấu trúc phổ biến: data/batch_01/Videos_L27_a/video/L27_V005.mp4
+    fast_patterns = [
+        f"batch_*/Videos_*/video/{video_id}.mp4",
+        f"video/{video_id}.mp4",
+        f"{video_id}.mp4"
+    ]
+    
+    for pattern in fast_patterns:
+        for p in Path("data").glob(pattern):
+            if p.exists():
+                _video_paths[video_id] = p
+                return p
+                
+    # Fallback chậm nếu không tìm thấy
+    for p in Path("data").rglob(f"{video_id}.mp4"):
+        _video_paths[video_id] = p
+        return p
+        
+    return None
+
+@app.get("/api/video_info/{video_id}")
+def get_video_info(video_id: str):
+    """Lấy thông tin video (fps)."""
+    video_path = _get_video_path(video_id)
+    if not video_path:
+        raise HTTPException(status_code=404, detail="Video not found")
+        
+    import cv2
+    cap = cv2.VideoCapture(str(video_path))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    cap.release()
+    
+    return {"fps": fps if fps > 0 else 25.0}
+
+@app.get("/api/video/{video_id}")
+def get_video(video_id: str, request: Request):
+    """Trả về video với hỗ trợ Range để tua."""
+    video_path = _get_video_path(video_id)
+    if not video_path:
+        raise HTTPException(status_code=404, detail="Video not found")
+        
+    file_size = video_path.stat().st_size
+    range_header = request.headers.get("Range")
+    
+    if range_header:
+        byte1, byte2 = 0, None
+        try:
+            match = range_header.replace("bytes=", "").split("-")
+            if match[0]:
+                byte1 = int(match[0])
+            if len(match) > 1 and match[1]:
+                byte2 = int(match[1])
+        except ValueError:
+            pass
+            
+        if byte2 is None:
+            byte2 = file_size - 1
+            
+        length = byte2 - byte1 + 1
+        
+        def video_generator(path, start, length, chunk_size=1024*1024):
+            with open(path, "rb") as f:
+                f.seek(start)
+                while length > 0:
+                    chunk = f.read(min(length, chunk_size))
+                    if not chunk:
+                        break
+                    length -= len(chunk)
+                    yield chunk
+                    
+        headers = {
+            "Content-Range": f"bytes {byte1}-{byte2}/{file_size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(length),
+        }
+        return StreamingResponse(
+            video_generator(video_path, byte1, length), 
+            status_code=206, 
+            headers=headers, 
+            media_type="video/mp4"
+        )
+        
+    return FileResponse(str(video_path), media_type="video/mp4")
+
+
 @app.post("/api/export")
 def export_submission(req: ExportRequest):
     """Tạo submission.zip và trả về để tải xuống."""
-    rows = []
+    from collections import defaultdict
+    rows_by_query = defaultdict(list)
+    
     for row in req.rows:
         vid = row.video_id.removesuffix(".mp4")
         r = [vid] + [str(f) for f in row.frames]
         if row.answer:
             r.append(row.answer)
-        rows.append(r)
+        rows_by_query[row.query_id].append(r)
 
-    if not rows:
+    if not rows_by_query:
         raise HTTPException(status_code=400, detail="No rows to export")
 
     with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
         tmp_path = tmp.name
 
     try:
-        write_submission({req.query_id: rows}, tmp_path)
+        write_submission(rows_by_query, tmp_path)
         zip_bytes = Path(tmp_path).read_bytes()
     finally:
         Path(tmp_path).unlink(missing_ok=True)
 
-    filename = f"{req.query_id}.zip"
+    filename = "submission.zip"
     return StreamingResponse(
         io.BytesIO(zip_bytes),
         media_type="application/zip",

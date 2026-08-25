@@ -118,11 +118,20 @@ function switchView(view) {
 function selectTask(task) {
   state.task = task;
   ['kis', 'qa', 'trake'].forEach(t => {
-    $(`pill-${t}`).classList.toggle('active', t === task);
+    const pill = $(`pill-${t}`);
+    if (pill) pill.classList.toggle('active', t === task);
   });
-  $('n-events-section').style.display = task === 'trake' ? '' : 'none';
-  $('answer-section').style.display = task === 'qa' ? '' : 'none';
-  $('results-task-badge').textContent = task.toUpperCase();
+  const nEvents = $('n-events-section');
+  if (nEvents) nEvents.style.display = task === 'trake' ? '' : 'none';
+  const answerSec = $('answer-section');
+  if (answerSec) answerSec.style.display = task === 'qa' ? '' : 'none';
+  const badge = $('results-task-badge');
+  if (badge) badge.textContent = task.toUpperCase();
+  
+  if (state.selected !== null) {
+    selectCandidate(state.selected);
+  }
+  renderSelectionsList();
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +273,26 @@ function setVerdict(idx, verdict, e) {
 // Detail panel
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// LocalStorage Persistence
+// ---------------------------------------------------------------------------
+
+function saveSelections() {
+  localStorage.setItem('aic_selections', JSON.stringify(state.selections));
+}
+
+function loadSelections() {
+  const data = localStorage.getItem('aic_selections');
+  if (data) {
+    try {
+      state.selections = JSON.parse(data);
+    } catch (e) {
+      console.error('Failed to load selections:', e);
+      state.selections = [];
+    }
+  }
+}
+
 function selectCandidate(idx) {
   state.selected = idx;
   const c = state.candidates[idx];
@@ -272,15 +301,56 @@ function selectCandidate(idx) {
     el.classList.toggle('selected', i === idx);
   });
 
-  const frameIdx = c.representative_frames[0] ?? c.start_frame;
+  const frameIdx = (c.representative_frames[0] ?? c.start_frame) + 1; // 1-indexed
   const img = $('preview-img');
+  const vid = $('preview-vid');
   const placeholder = $('preview-placeholder');
+  
   img.style.display = 'none';
+  if (vid) vid.style.display = 'none';
   placeholder.style.display = 'flex';
-  img.onload = () => { img.style.display = 'block'; placeholder.style.display = 'none'; };
-  img.onerror = () => { img.style.display = 'none'; placeholder.style.display = 'flex'; };
-  img.src = keyframeUrl(c.video_id, frameIdx);
-  img.alt = c.video_id;
+  
+  const queryId = $('query-id-input').value.trim() || 'q1';
+  let initialFrame = frameIdx;
+  
+  // Load initial frame from confirmed selection if exists
+  const existing = state.selections.find(s => s.queryId === queryId && s.video_id === c.video_id);
+  if (existing && existing.frames && existing.frames[0]) {
+    initialFrame = existing.frames[0];
+  }
+  
+  if (vid) {
+    // Hiển thị Video, fallback sang keyframe nếu video lỗi
+    vid.src = `/api/video/${c.video_id}`;
+    vid.onloadeddata = async () => {
+      vid.style.display = 'block';
+      placeholder.style.display = 'none';
+      img.style.display = 'none';
+      
+      // Tìm FPS để seek
+      try {
+        const res = await fetch(`/api/video_info/${c.video_id}`);
+        if (res.ok) {
+          const data = await res.json();
+          state.currentFps = data.fps;
+          vid.currentTime = Math.max(0, initialFrame - 1) / data.fps;
+        }
+      } catch (e) {
+        console.warn('Cannot fetch video info:', e);
+      }
+    };
+    vid.onerror = () => {
+      vid.style.display = 'none';
+      // Load ảnh keyframe thay thế
+      img.onload = () => { img.style.display = 'block'; placeholder.style.display = 'none'; };
+      img.onerror = () => { img.style.display = 'none'; placeholder.style.display = 'flex'; };
+      img.src = keyframeUrl(c.video_id, initialFrame);
+    };
+  } else {
+    img.onload = () => { img.style.display = 'block'; placeholder.style.display = 'none'; };
+    img.onerror = () => { img.style.display = 'none'; placeholder.style.display = 'flex'; };
+    img.src = keyframeUrl(c.video_id, initialFrame);
+  }
 
   $('detail-rank-badge').textContent = `#${c.rank}`;
 
@@ -298,15 +368,74 @@ function selectCandidate(idx) {
   }
 
   const evidenceSection = $('detail-evidence-section');
-  if (c.evidence && Object.keys(c.evidence).length) {
-    evidenceSection.style.display = '';
-    $('detail-evidence-text').textContent = JSON.stringify(c.evidence, null, 2);
+  if (evidenceSection) evidenceSection.style.display = 'none';
+
+  if (state.task === 'trake') {
+    $('frame-picker-single-row').style.display = 'none';
+    const trakeContainer = $('frame-picker-trake-container');
+    trakeContainer.style.display = 'flex';
+    
+    // Render dynamic event inputs
+    const n_events = parseInt($('n-events-input').value, 10) || 3;
+    trakeContainer.innerHTML = '';
+    
+    const existingFrames = existing ? existing.frames : [];
+    
+    for (let i = 1; i <= n_events; i++) {
+      const val = existingFrames[i - 1] !== undefined ? existingFrames[i - 1] : (i === 1 ? frameIdx : '');
+      const slot = document.createElement('div');
+      slot.className = 'trake-event-slot';
+      slot.style.display = 'flex';
+      slot.style.alignItems = 'center';
+      slot.style.gap = '8px';
+      slot.style.marginBottom = '6px';
+      slot.innerHTML = `
+        <span style="font-size:12px; min-width:55px; color:var(--text-secondary)">Event ${i}:</span>
+        <input type="number" class="trake-event-input" id="trake-frame-input-${i}" value="${val}" placeholder="Frame" min="1" style="flex:1; padding:6px 8px; font-size:12px;" />
+        <button class="selection-btn" style="width:auto; padding:0 8px; height:26px;" onclick="grabTrakeFrame(${i}, event)">Get</button>
+      `;
+      
+      const input = slot.querySelector('.trake-event-input');
+      input.addEventListener('input', (e) => {
+        const frameVal = parseInt(e.target.value, 10);
+        if (!isNaN(frameVal) && vid && vid.style.display !== 'none') {
+          const fps = state.currentFps || 25;
+          vid.currentTime = Math.max(0, frameVal - 1) / fps;
+        }
+      });
+      
+      trakeContainer.appendChild(slot);
+    }
   } else {
-    evidenceSection.style.display = 'none';
+    $('frame-picker-single-row').style.display = 'flex';
+    $('frame-picker-trake-container').style.display = 'none';
+    $('frame-input').value = existing ? existing.frames[0] : frameIdx;
   }
 
-  $('frame-input').value = frameIdx;
+  if (state.task === 'qa') {
+    $('answer-input').value = existing ? existing.answer : '';
+  }
+
   $('btn-confirm-selection').disabled = false;
+}
+
+function grabTrakeFrame(index, e) {
+  if (e) e.preventDefault();
+  const vid = $('preview-vid');
+  let frameVal = 1;
+  if (vid && vid.style.display !== 'none') {
+    const fps = state.currentFps || 25;
+    frameVal = Math.round(vid.currentTime * fps) + 1;
+  } else if (state.selected !== null) {
+    const c = state.candidates[state.selected];
+    frameVal = (c.representative_frames[0] ?? c.start_frame) + 1;
+  }
+  const input = $(`trake-frame-input-${index}`);
+  if (input) {
+    input.value = frameVal;
+    input.style.borderColor = 'var(--green)';
+    setTimeout(() => { input.style.borderColor = ''; }, 1000);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -316,37 +445,173 @@ function selectCandidate(idx) {
 function confirmSelection() {
   if (state.selected === null) return;
   const c = state.candidates[state.selected];
-  const frameInput = parseInt($('frame-input').value, 10);
-  const frame = isNaN(frameInput) ? (c.representative_frames[0] ?? c.start_frame) : frameInput;
-  const answer = $('answer-input').value.trim();
   const queryId = $('query-id-input').value.trim() || 'q1';
 
-  const existing = state.selections.findIndex(s => s.video_id === c.video_id && s.queryId === queryId);
-  if (existing >= 0) state.selections.splice(existing, 1);
-
-  state.selections.push({ video_id: c.video_id, frames: [frame], answer, queryId, task: state.task, rank: c.rank });
+  if (state.task === 'kis') {
+    const frameInput = parseInt($('frame-input').value, 10);
+    const frame = isNaN(frameInput) ? (c.representative_frames[0] ?? c.start_frame) + 1 : frameInput;
+    
+    const isDup = state.selections.some(s => s.queryId === queryId && s.video_id === c.video_id && s.frames[0] === frame);
+    if (isDup) {
+      toast('Lựa chọn này đã tồn tại trong danh sách!', 'warning');
+      return;
+    }
+    
+    state.selections.push({
+      queryId,
+      task: 'kis',
+      video_id: c.video_id,
+      frames: [frame],
+      answer: '',
+      rank: c.rank || (state.selections.filter(s => s.queryId === queryId).length + 1)
+    });
+    toast(`Đã thêm ${c.video_id} f${frame} vào KIS`, 'success');
+  } 
+  else if (state.task === 'qa') {
+    const frameInput = parseInt($('frame-input').value, 10);
+    const frame = isNaN(frameInput) ? (c.representative_frames[0] ?? c.start_frame) + 1 : frameInput;
+    const answer = $('answer-input').value.trim();
+    
+    if (!answer) {
+      toast('Vui lòng nhập câu trả lời cho Q&A!', 'warning');
+      return;
+    }
+    if (answer.length > 100) {
+      toast('Câu trả lời vượt quá giới hạn 100 ký tự!', 'error');
+      return;
+    }
+    
+    const isDup = state.selections.some(s => s.queryId === queryId && s.video_id === c.video_id && s.frames[0] === frame && s.answer === answer);
+    if (isDup) {
+      toast('Lựa chọn này đã tồn tại trong danh sách!', 'warning');
+      return;
+    }
+    
+    state.selections.push({
+      queryId,
+      task: 'qa',
+      video_id: c.video_id,
+      frames: [frame],
+      answer,
+      rank: c.rank || (state.selections.filter(s => s.queryId === queryId).length + 1)
+    });
+    toast(`Đã thêm ${c.video_id} f${frame} vào Q&A`, 'success');
+  } 
+  else if (state.task === 'trake') {
+    const n_events = parseInt($('n-events-input').value, 10) || 3;
+    const frames = [];
+    let hasMissing = false;
+    
+    for (let i = 1; i <= n_events; i++) {
+      const val = parseInt($(`trake-frame-input-${i}`).value, 10);
+      if (isNaN(val)) {
+        hasMissing = true;
+      }
+      frames.push(val);
+    }
+    
+    if (hasMissing) {
+      toast(`Vui lòng điền đủ ${n_events} sự kiện cho TRAKE!`, 'warning');
+      return;
+    }
+    
+    const isDup = state.selections.some(s => s.queryId === queryId && s.video_id === c.video_id && JSON.stringify(s.frames) === JSON.stringify(frames));
+    if (isDup) {
+      toast('Lựa chọn này đã tồn tại trong danh sách!', 'warning');
+      return;
+    }
+    
+    state.selections.push({
+      queryId,
+      task: 'trake',
+      video_id: c.video_id,
+      frames,
+      answer: '',
+      rank: c.rank || (state.selections.filter(s => s.queryId === queryId).length + 1)
+    });
+    toast(`Đã thêm ${c.video_id} (${n_events} events) vào TRAKE`, 'success');
+  }
+  
+  saveSelections();
   renderSelectionsList();
-  toast(`Đã thêm ${c.video_id} frame ${frame}`, 'success');
 }
 
 function removeSelection(idx) {
   state.selections.splice(idx, 1);
+  saveSelections();
   renderSelectionsList();
+  if ($('view-export').classList.contains('active')) {
+    renderExportTable();
+  }
+  toast('Đã xoá lựa chọn', 'info');
+}
+
+function moveSelection(index, direction) {
+  const item = state.selections[index];
+  if (!item) return;
+  
+  const queryId = item.queryId;
+  const filteredIndexes = [];
+  state.selections.forEach((s, idx) => {
+    if (s.queryId === queryId) filteredIndexes.push(idx);
+  });
+  
+  const currentPos = filteredIndexes.indexOf(index);
+  if (currentPos === -1) return;
+  
+  const targetPos = currentPos + direction;
+  if (targetPos < 0 || targetPos >= filteredIndexes.length) return;
+  
+  const targetIndex = filteredIndexes[targetPos];
+  const temp = state.selections[index];
+  state.selections[index] = state.selections[targetIndex];
+  state.selections[targetIndex] = temp;
+  
+  saveSelections();
+  renderSelectionsList();
+  if ($('view-export').classList.contains('active')) {
+    renderExportTable();
+  }
 }
 
 function renderSelectionsList() {
   const list = $('selections-list');
-  $('sel-count').textContent = state.selections.length;
-  if (!state.selections.length) {
-    list.innerHTML = '<div style="color:var(--text-muted);font-size:12px;text-align:center;padding:12px">Chưa có lựa chọn nào</div>';
+  const queryId = $('query-id-input').value.trim() || 'q1';
+  const querySelections = state.selections.filter(s => s.queryId === queryId);
+  
+  $('sel-count').textContent = querySelections.length;
+  if (!querySelections.length) {
+    list.innerHTML = '<div style="color:var(--text-muted);font-size:12px;text-align:center;padding:12px">Chưa có lựa chọn nào cho query này</div>';
     return;
   }
-  list.innerHTML = state.selections.map((s, i) => `
-    <div class="selection-item">
-      <div class="selection-rank">${s.rank || i + 1}</div>
-      <div class="selection-info">${s.video_id}<br><span style="color:var(--text-muted)">f${s.frames[0]}</span></div>
-      <button class="selection-del" onclick="removeSelection(${i})" title="Xoá">✕</button>
-    </div>`).join('');
+  
+  list.innerHTML = querySelections.map((s, idx) => {
+    const absoluteIdx = state.selections.indexOf(s);
+    let infoText = '';
+    
+    if (s.task === 'kis') {
+      infoText = `${s.video_id} <span style="color:var(--text-muted)">f${s.frames[0]}</span>`;
+    } else if (s.task === 'qa') {
+      const truncateAns = s.answer.length > 15 ? s.answer.substring(0, 15) + '...' : s.answer;
+      infoText = `${s.video_id} <span style="color:var(--text-muted)">f${s.frames[0]}</span><br><span style="font-size:11px;color:var(--text-secondary)">"${truncateAns}"</span>`;
+    } else if (s.task === 'trake') {
+      infoText = `${s.video_id} <span style="color:var(--text-muted)">f[${s.frames.join(',')}]</span>`;
+    }
+    
+    const isFirst = idx === 0;
+    const isLast = idx === querySelections.length - 1;
+    
+    return `
+      <div class="selection-item">
+        <div class="selection-rank">${idx + 1}</div>
+        <div class="selection-info">${infoText}</div>
+        <div class="selection-actions">
+          <button class="selection-btn" onclick="moveSelection(${absoluteIdx}, -1)" ${isFirst ? 'disabled' : ''} title="Lên">▲</button>
+          <button class="selection-btn" onclick="moveSelection(${absoluteIdx}, 1)" ${isLast ? 'disabled' : ''} title="Xuống">▼</button>
+          <button class="selection-del" onclick="removeSelection(${absoluteIdx})" title="Xoá">✕</button>
+        </div>
+      </div>`;
+  }).join('');
 }
 
 // ---------------------------------------------------------------------------
@@ -527,72 +792,205 @@ function buildRoundProgress() {
 // Export view
 // ---------------------------------------------------------------------------
 
+getQuerySummary;
+
+function getQuerySummary() {
+  const summary = {};
+  state.selections.forEach(s => {
+    if (!summary[s.queryId]) {
+      summary[s.queryId] = {
+        queryId: s.queryId,
+        task: s.task,
+        selections: []
+      };
+    }
+    summary[s.queryId].selections.push(s);
+  });
+  return Object.values(summary);
+}
+
+function removeQuerySelections(queryId) {
+  if (confirm(`Bạn có chắc chắn muốn xoá toàn bộ lựa chọn cho query ${queryId}?`)) {
+    state.selections = state.selections.filter(s => s.queryId !== queryId);
+    saveSelections();
+    renderSelectionsList();
+    renderExportTable();
+    toast(`Đã xoá các lựa chọn của query ${queryId}`, 'info');
+  }
+}
+
+function showExportReview(queryId) {
+  const querySelections = state.selections.filter(s => s.queryId === queryId);
+  if (!querySelections.length) return;
+  
+  const q = querySelections[0];
+  $('review-query-id').textContent = queryId;
+  $('review-task-badge').textContent = q.task.toUpperCase();
+  
+  const body = $('review-content-body');
+  body.innerHTML = '';
+  
+  const card = $('export-review-card');
+  card.style.display = 'block';
+  
+  if (q.task === 'kis') {
+    const html = querySelections.map((s, idx) => `
+      <div style="display:flex; align-items:center; gap:12px; background:var(--bg-panel); border:1px solid var(--border); border-radius:var(--radius-md); padding:10px;">
+        <div class="selection-rank" style="background:var(--purple-light)">${idx + 1}</div>
+        <div style="width:120px; aspect-ratio:16/9; border-radius:var(--radius-sm); overflow:hidden; background:#000; flex-shrink:0;">
+          <img src="${keyframeUrl(s.video_id, s.frames[0])}" style="width:100%; height:100%; object-fit:cover;" />
+        </div>
+        <div style="flex:1">
+          <div style="font-family:'JetBrains Mono',monospace; font-weight:600; color:var(--cyan); font-size:13px;">${s.video_id}</div>
+          <div style="font-size:12px; color:var(--text-secondary)">Frame: ${s.frames[0]}</div>
+        </div>
+      </div>
+    `).join('');
+    body.innerHTML = `<div style="display:flex; flex-direction:column; gap:8px;">${html}</div>`;
+  }
+  else if (q.task === 'qa') {
+    const html = querySelections.map((s, idx) => `
+      <div style="display:flex; align-items:flex-start; gap:12px; background:var(--bg-panel); border:1px solid var(--border); border-radius:var(--radius-md); padding:12px;">
+        <div class="selection-rank" style="background:var(--cyan); margin-top:2px;">${idx + 1}</div>
+        <div style="width:120px; aspect-ratio:16/9; border-radius:var(--radius-sm); overflow:hidden; background:#000; flex-shrink:0;">
+          <img src="${keyframeUrl(s.video_id, s.frames[0])}" style="width:100%; height:100%; object-fit:cover;" />
+        </div>
+        <div style="flex:1">
+          <div style="font-family:'JetBrains Mono',monospace; font-weight:600; color:var(--cyan); font-size:13px; margin-bottom:2px;">${s.video_id} <span style="font-size:11px; color:var(--text-muted)">f${s.frames[0]}</span></div>
+          <div style="font-size:11px; font-weight:600; color:var(--text-muted); text-transform:uppercase; margin-bottom:2px;">Đáp án:</div>
+          <div style="font-size:13px; color:var(--text-primary); font-weight:500; background:rgba(255,255,255,0.03); border:1px solid var(--border); padding:6px 10px; border-radius:var(--radius-sm); white-space:pre-wrap;">${s.answer}</div>
+        </div>
+      </div>
+    `).join('');
+    body.innerHTML = `<div style="display:flex; flex-direction:column; gap:8px;">${html}</div>`;
+  }
+  else if (q.task === 'trake') {
+    const html = querySelections.map((s, idx) => {
+      const eventsHtml = s.frames.map((frame, eIdx) => `
+        <div style="flex:1; min-width:110px; display:flex; flex-direction:column; gap:4px; background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:var(--radius-md); padding:6px; align-items:center;">
+          <div style="font-size:10px; font-weight:600; color:var(--text-muted);">Sự kiện ${eIdx + 1}</div>
+          <div style="width:100%; aspect-ratio:16/9; border-radius:var(--radius-sm); overflow:hidden; background:#000;">
+            <img src="${keyframeUrl(s.video_id, frame)}" style="width:100%; height:100%; object-fit:cover;" />
+          </div>
+          <div style="font-family:'JetBrains Mono',monospace; font-size:10px; color:var(--cyan); font-weight:600;">f${frame}</div>
+        </div>
+      `).join('');
+      
+      return `
+        <div style="display:flex; flex-direction:column; gap:8px; background:var(--bg-panel); border:1px solid var(--border); border-radius:var(--radius-md); padding:12px;">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <div class="selection-rank" style="background:var(--amber)">${idx + 1}</div>
+            <div style="font-family:'JetBrains Mono',monospace; font-weight:600; color:var(--cyan); font-size:13px;">${s.video_id}</div>
+          </div>
+          <div style="display:flex; gap:8px; overflow-x:auto; padding-bottom:4px;">
+            ${eventsHtml}
+          </div>
+        </div>
+      `;
+    }).join('');
+    body.innerHTML = `<div style="display:flex; flex-direction:column; gap:10px;">${html}</div>`;
+  }
+  
+  card.scrollIntoView({ behavior: 'smooth' });
+}
+
 function renderExportTable() {
   const tbody = $('export-tbody');
   const count = $('export-query-count');
+  const summary = getQuerySummary();
 
-  if (!state.selections.length) {
+  if (!summary.length) {
     tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:32px">Chưa có kết quả. Hãy tìm kiếm và xác nhận lựa chọn trước.</td></tr>';
     count.textContent = '0 queries';
+    $('export-review-card').style.display = 'none';
     refreshPreview();
     return;
   }
 
-  const byQuery = {};
-  state.selections.forEach(s => { if (!byQuery[s.queryId]) byQuery[s.queryId] = []; byQuery[s.queryId].push(s); });
-  const queryIds = Object.keys(byQuery);
-  count.textContent = `${queryIds.length} quer${queryIds.length !== 1 ? 'ies' : 'y'}`;
+  count.textContent = `${summary.length} quer${summary.length !== 1 ? 'ies' : 'y'}`;
 
-  tbody.innerHTML = state.selections.map((s, i) => `
-    <tr>
-      <td style="font-family:'JetBrains Mono',monospace;font-size:12px">${s.queryId}</td>
-      <td><span class="badge badge-purple">${s.task.toUpperCase()}</span></td>
-      <td style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--cyan)">${s.video_id}</td>
-      <td style="font-family:'JetBrains Mono',monospace;font-size:12px">${s.frames.join(', ')}</td>
-      <td>
-        <span class="badge badge-green">✓ Ready</span>
-        <button class="btn-translate" style="margin-left:6px;font-size:10px;padding:2px 8px" onclick="removeExportRow(${i})">✕</button>
-      </td>
-    </tr>`).join('');
+  tbody.innerHTML = summary.map((q, idx) => {
+    let detailsText = '';
+    let statusText = '<span class="badge badge-green">✓ Ready</span>';
+    
+    if (q.task === 'kis') {
+      detailsText = `${q.selections.length} cảnh (KIS)`;
+    } else if (q.task === 'qa') {
+      detailsText = `${q.selections.length} câu trả lời (QA)`;
+    } else if (q.task === 'trake') {
+      detailsText = `${q.selections.length} chuỗi sự kiện (TRAKE)`;
+      const n_events = parseInt($('n-events-input').value, 10) || 3;
+      const incomplete = q.selections.some(s => s.frames.length < n_events);
+      if (incomplete) {
+        statusText = `<span class="badge badge-amber" title="Có dòng chưa đủ ${n_events} sự kiện">⚠️ Thiếu event</span>`;
+      }
+    }
+    
+    return `
+      <tr>
+        <td style="font-family:'JetBrains Mono',monospace;font-size:12px">${q.queryId}</td>
+        <td><span class="badge badge-purple">${q.task.toUpperCase()}</span></td>
+        <td style="font-size:12px;color:var(--text-secondary);max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${detailsText}">${detailsText}</td>
+        <td>${statusText}</td>
+        <td>
+          <div style="display:flex; gap:6px;">
+            <button class="btn-translate" style="padding:2px 8px; font-size:11px;" onclick="showExportReview('${q.queryId}')">👁️ Xem</button>
+            <button class="btn-translate" style="padding:2px 8px; font-size:11px; color:var(--red); border-color:rgba(239,68,68,0.25); background:rgba(239,68,68,0.1);" onclick="removeQuerySelections('${q.queryId}')">✕ Xoá</button>
+          </div>
+        </td>
+      </tr>`;
+  }).join('');
 
   refreshPreview();
-}
-
-function removeExportRow(idx) {
-  state.selections.splice(idx, 1);
-  renderSelectionsList();
-  renderExportTable();
 }
 
 function refreshPreview() {
   const preview = $('csv-preview');
   if (!state.selections.length) { preview.textContent = '— chưa có dữ liệu —'; return; }
-  const lines = state.selections.map(s => {
-    const vid = s.video_id.replace(/\.mp4$/, '');
-    const parts = [vid, ...s.frames.map(String)];
-    if (s.answer) parts.push(s.answer);
-    return parts.join(',');
+  
+  const byQuery = {};
+  state.selections.forEach(s => {
+    if (!byQuery[s.queryId]) byQuery[s.queryId] = [];
+    byQuery[s.queryId].push(s);
   });
-  preview.textContent = lines.join('\n');
+  
+  let text = '';
+  Object.entries(byQuery).forEach(([queryId, selections]) => {
+    text += `=== submission/${queryId}.csv ===\n`;
+    selections.forEach(s => {
+      const vid = s.video_id.replace(/\.mp4$/, '');
+      const parts = [vid, ...s.frames.map(String)];
+      if (s.answer) {
+        let ans = s.answer;
+        if (ans.includes(',') || ans.includes('"') || ans.includes('\n')) {
+          ans = `"${ans.replace(/"/g, '""')}"`;
+        }
+        parts.push(ans);
+      }
+      text += parts.join(',') + '\n';
+    });
+    text += '\n';
+  });
+  
+  preview.textContent = text.trim();
 }
 
 async function doExport() {
   if (!state.selections.length) { toast('Chưa có lựa chọn để export', 'warning'); return; }
-  const exportQueryId = $('export-query-id').value.trim() || $('query-id-input').value.trim() || 'q1';
-  const rows = state.selections.map(s => ({ video_id: s.video_id, frames: s.frames, answer: s.answer || '' }));
+  const rows = state.selections.map(s => ({ query_id: s.queryId || 'q1', video_id: s.video_id, frames: s.frames, answer: s.answer || '' }));
 
   setLoading('btn-export', true);
   try {
     const res = await fetch('/api/export', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query_id: exportQueryId, task: state.task, rows }),
+      body: JSON.stringify({ task: state.task, rows }),
     });
     if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Export failed'); }
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = `${exportQueryId}.zip`;
+    a.href = url; a.download = `submission.zip`;
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
     toast('Đã tải xuống submission.zip', 'success');
@@ -653,10 +1051,83 @@ document.addEventListener('keydown', (e) => {
 // ---------------------------------------------------------------------------
 
 document.addEventListener('DOMContentLoaded', () => {
+  loadSelections();
   checkStatus();
   setInterval(checkStatus, 30000);
   selectTask('kis');
   $('query-id-input').addEventListener('input', () => {
     $('export-query-id').value = $('query-id-input').value;
+    renderSelectionsList();
   });
+
+  const vid = $('preview-vid');
+  if (vid) {
+    vid.addEventListener('timeupdate', () => {
+      if (vid.style.display !== 'none' && document.activeElement !== $('frame-input')) {
+        const fps = state.currentFps || 25;
+        const currentFrame = Math.round(vid.currentTime * fps) + 1;
+        if (state.task !== 'trake') {
+          $('frame-input').value = currentFrame;
+        }
+      }
+    });
+    vid.addEventListener('seeked', () => {
+      if (vid.style.display !== 'none' && document.activeElement !== $('frame-input')) {
+        const fps = state.currentFps || 25;
+        const currentFrame = Math.round(vid.currentTime * fps) + 1;
+        if (state.task !== 'trake') {
+          $('frame-input').value = currentFrame;
+        }
+      }
+    });
+  }
+
+  const frameInput = $('frame-input');
+  if (frameInput) {
+    frameInput.addEventListener('input', (e) => {
+      const frame = parseInt(e.target.value, 10);
+      if (!isNaN(frame) && vid && vid.style.display !== 'none') {
+        const fps = state.currentFps || 25;
+        vid.currentTime = Math.max(0, frame - 1) / fps;
+      }
+    });
+  }
 });
+
+// Xử lý upload file txt query
+function handleQueryFileUpload(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+
+  const fileNameWithoutExt = file.name.replace(/\.[^/.]+$/, "");
+  const queryIdInput = document.getElementById('query-id-input');
+  if (queryIdInput) {
+    queryIdInput.value = fileNameWithoutExt;
+    const exportQueryId = document.getElementById('export-query-id');
+    if (exportQueryId) exportQueryId.value = fileNameWithoutExt;
+  }
+
+  // Tự động nhận diện loại task qua suffix
+  const nameLower = fileNameWithoutExt.toLowerCase();
+  let autoTask = 'kis';
+  if (nameLower.endsWith('kis') || nameLower.includes('-kis')) {
+    autoTask = 'kis';
+  } else if (nameLower.endsWith('qa') || nameLower.includes('-qa')) {
+    autoTask = 'qa';
+  } else if (nameLower.endsWith('trake') || nameLower.includes('-trake')) {
+    autoTask = 'trake';
+  }
+  selectTask(autoTask);
+
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    const text = e.target.result;
+    const queryInput = document.getElementById('query-input');
+    if (queryInput) {
+      queryInput.value = text;
+      queryInput.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    event.target.value = '';
+  };
+  reader.readAsText(file);
+}

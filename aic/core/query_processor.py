@@ -171,9 +171,10 @@ def _rule_based_extract(query: Query) -> None:
 def _gemini_process_query(text_vi: str) -> dict:
     """Dùng Gemini phân tích trích xuất bản dịch, từ đồng nghĩa và objects."""
     import json
+    import os
     from google import genai
 
-    client = genai.Client()
+    client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
     prompt = (
         "Analyze this Vietnamese video search query and output a JSON object:\n"
         f"Query: \"{text_vi}\"\n\n"
@@ -187,7 +188,7 @@ def _gemini_process_query(text_vi: str) -> dict:
     )
     
     response = client.models.generate_content(
-        model="gemini-2.0-flash",
+        model="gemini-3.6-flash",
         contents=prompt,
     )
     txt = response.text.strip()
@@ -200,11 +201,12 @@ def _gemini_process_query(text_vi: str) -> dict:
 
 def _gemini_translate(text_vi: str) -> str:
     """Dịch tiếng Việt → tiếng Anh bằng Gemini API."""
+    import os
     from google import genai
 
-    client = genai.Client()
+    client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
     response = client.models.generate_content(
-        model="gemini-2.0-flash",
+        model="gemini-3.6-flash",
         contents=(
             "Translate the following Vietnamese text to English. "
             "Keep all details including colors, numbers, negations, "
