@@ -17,7 +17,6 @@ API:
 
 from __future__ import annotations
 
-import io
 import logging
 import os
 import tempfile
@@ -44,7 +43,13 @@ from ..core.types import Candidate
 from ..fusion.rank import fuse
 from ..pipeline import retrieve_and_fuse
 from ..retrieval import dummy
-from ..submission.writer import write_submission
+from ..submission import (
+    GeneratedArchiveError,
+    QueryDefinition,
+    SubmissionValidationError,
+    write_validated_submission,
+)
+from ..submission.query_pack import parse_query_files, parse_query_zip
 
 logger = logging.getLogger(__name__)
 
@@ -137,8 +142,26 @@ class ExportRow(BaseModel):
     answer: str = ""
 
 
+class QueryTextFileIn(BaseModel):
+    filename: str
+    content: str
+
+
+class QueryPackTextsRequest(BaseModel):
+    files: list[QueryTextFileIn]
+
+
+class QueryManifestIn(BaseModel):
+    query_id: str
+    task: str
+    text: str
+    source_name: str
+    n_events: int | None
+    events_confirmed: bool
+
+
 class ExportRequest(BaseModel):
-    task: str = "kis"
+    manifest: list[QueryManifestIn]
     rows: list[ExportRow]
 
 
@@ -174,6 +197,26 @@ def _candidate_to_out(cand: Candidate, rank: int) -> dict:
 # ---------------------------------------------------------------------------
 # API Routes
 # ---------------------------------------------------------------------------
+
+
+def _query_pack_response(result):
+    report = result.to_dict()
+    if not result.ok:
+        raise HTTPException(status_code=422, detail=report)
+    return report
+
+
+@app.post("/api/query-pack/zip")
+async def import_query_pack_zip(request: Request):
+    """Parse an uploaded query-pack ZIP body into an ordered manifest."""
+    return _query_pack_response(parse_query_zip(await request.body()))
+
+
+@app.post("/api/query-pack/texts")
+def import_query_pack_texts(req: QueryPackTextsRequest):
+    """Parse JSON-supplied query TXT files into an ordered manifest."""
+    files = [(item.filename, item.content) for item in req.files]
+    return _query_pack_response(parse_query_files(files))
 
 
 @app.get("/api/status")
@@ -415,34 +458,32 @@ def get_video(video_id: str, request: Request):
 
 @app.post("/api/export")
 def export_submission(req: ExportRequest):
-    """Tạo submission.zip và trả về để tải xuống."""
-    from collections import defaultdict
-    rows_by_query = defaultdict(list)
-    
-    for row in req.rows:
-        vid = row.video_id.removesuffix(".mp4")
-        r = [vid] + [str(f) for f in row.frames]
-        if row.answer:
-            r.append(row.answer)
-        rows_by_query[row.query_id].append(r)
-
-    if not rows_by_query:
-        raise HTTPException(status_code=400, detail="No rows to export")
+    """Validate operator rows and return a reparsed PASS submission ZIP."""
+    manifest = [QueryDefinition(**query.model_dump()) for query in req.manifest]
+    rows = [row.model_dump() for row in req.rows]
 
     with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
         tmp_path = tmp.name
 
     try:
-        write_submission(rows_by_query, tmp_path)
+        try:
+            write_validated_submission(manifest, rows, tmp_path)
+        except SubmissionValidationError as error:
+            raise HTTPException(status_code=422, detail=error.report.to_dict())
+        except GeneratedArchiveError as error:
+            raise HTTPException(status_code=500, detail=error.report.to_dict())
         zip_bytes = Path(tmp_path).read_bytes()
     finally:
         Path(tmp_path).unlink(missing_ok=True)
 
     filename = "submission.zip"
-    return StreamingResponse(
-        io.BytesIO(zip_bytes),
+    return Response(
+        content=zip_bytes,
         media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Validation-Status": "PASS",
+        },
     )
 
 
