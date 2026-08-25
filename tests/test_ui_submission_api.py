@@ -12,7 +12,9 @@ from aic.submission.query_pack import ValidationIssue
 from aic.submission.validator import GeneratedArchiveError, ValidationReport
 
 
-os.environ["AIC_USE_DUMMY"] = "1"
+_MISSING = object()
+_prior_use_dummy = os.environ.get("AIC_USE_DUMMY", _MISSING)
+_prior_retrieval_module = sys.modules.get("aic.retrieval", _MISSING)
 
 
 class _DummyRetriever:
@@ -25,10 +27,23 @@ class _DummyRetriever:
 
 retrieval_stub = types.ModuleType("aic.retrieval")
 retrieval_stub.dummy = _DummyRetriever()
-sys.modules.setdefault("aic.retrieval", retrieval_stub)
 
-app_module = importlib.import_module("aic.ui.app")
-client = TestClient(app_module.app)
+try:
+    os.environ["AIC_USE_DUMMY"] = "1"
+    sys.modules["aic.retrieval"] = retrieval_stub
+    app_module = importlib.import_module("aic.ui.app")
+finally:
+    if _prior_use_dummy is _MISSING:
+        os.environ.pop("AIC_USE_DUMMY", None)
+    else:
+        os.environ["AIC_USE_DUMMY"] = _prior_use_dummy
+
+    if _prior_retrieval_module is _MISSING:
+        sys.modules.pop("aic.retrieval", None)
+    else:
+        sys.modules["aic.retrieval"] = _prior_retrieval_module
+
+client = TestClient(app_module.app, raise_server_exceptions=False)
 
 
 def _zip_bytes(entries):
@@ -228,6 +243,154 @@ def test_invalid_export_returns_422_with_stable_validation_codes():
     assert detail["warnings"] == []
 
 
+def test_export_rejects_all_manifest_invariant_bypasses_in_one_stable_report():
+    manifest = [
+        {
+            "query_id": "query-p1-4-other",
+            "task": "kis",
+            "text": "unknown suffix",
+            "source_name": "query-p1-4-other.txt",
+            "n_events": None,
+            "events_confirmed": True,
+        },
+        {
+            "query_id": "query-p1-5-kis",
+            "task": "other",
+            "text": "unknown task",
+            "source_name": "query-p1-5-kis.txt",
+            "n_events": None,
+            "events_confirmed": True,
+        },
+        {
+            "query_id": "query-p1-6-kis",
+            "task": "qa",
+            "text": "mismatched task",
+            "source_name": "query-p1-6-kis.txt",
+            "n_events": None,
+            "events_confirmed": True,
+        },
+        {
+            "query_id": "../query-p1-7-kis",
+            "task": "kis",
+            "text": "unsafe ID",
+            "source_name": "query-p1-7-kis.txt",
+            "n_events": None,
+            "events_confirmed": True,
+        },
+        {
+            "query_id": "query-p1-8-qa",
+            "task": "qa",
+            "text": "first duplicate",
+            "source_name": "query-p1-8-qa.txt",
+            "n_events": None,
+            "events_confirmed": True,
+        },
+        {
+            "query_id": "query-p1-8-qa",
+            "task": "qa",
+            "text": "second duplicate",
+            "source_name": "query-p1-8-qa.txt",
+            "n_events": None,
+            "events_confirmed": True,
+        },
+        {
+            "query_id": "query-p1-9-trake",
+            "task": "trake",
+            "text": "zero events",
+            "source_name": "query-p1-9-trake.txt",
+            "n_events": 0,
+            "events_confirmed": True,
+        },
+        {
+            "query_id": "query-p1-10-trake",
+            "task": "trake",
+            "text": "missing events",
+            "source_name": "query-p1-10-trake.txt",
+            "n_events": None,
+            "events_confirmed": True,
+        },
+    ]
+
+    response = client.post("/api/export", json={"manifest": manifest, "rows": []})
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "ok": False,
+        "errors": [
+            {
+                "code": "invalid_task_suffix",
+                "message": (
+                    "Query ID 'query-p1-4-other' must end with -kis, -qa, or -trake"
+                ),
+                "query_id": "query-p1-4-other",
+                "row": None,
+            },
+            {
+                "code": "invalid_manifest_task",
+                "message": "Manifest task must be kis, qa, or trake; got 'other'",
+                "query_id": "query-p1-5-kis",
+                "row": None,
+            },
+            {
+                "code": "manifest_task_mismatch",
+                "message": "Query ID suffix implies 'kis', not 'qa'",
+                "query_id": "query-p1-6-kis",
+                "row": None,
+            },
+            {
+                "code": "unsafe_query_id",
+                "message": "Query ID must be a non-empty filename without a path",
+                "query_id": "../query-p1-7-kis",
+                "row": None,
+            },
+            {
+                "code": "duplicate_query_id",
+                "message": "Duplicate query ID: query-p1-8-qa",
+                "query_id": "query-p1-8-qa",
+                "row": None,
+            },
+            {
+                "code": "invalid_trake_event_count",
+                "message": "Confirmed TRAKE query requires a positive event count",
+                "query_id": "query-p1-9-trake",
+                "row": None,
+            },
+            {
+                "code": "invalid_trake_event_count",
+                "message": "Confirmed TRAKE query requires a positive event count",
+                "query_id": "query-p1-10-trake",
+                "row": None,
+            },
+        ],
+        "warnings": [],
+    }
+
+
+def test_export_preserves_raw_frame_types_for_domain_validation():
+    response = client.post(
+        "/api/export",
+        json={
+            "manifest": _manifest()[:1],
+            "rows": [
+                {
+                    "query_id": "query-p1-1-kis",
+                    "video_id": "L01_V001",
+                    "frames": [True, "12"],
+                    "answer": "",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert [error["code"] for error in detail["errors"]] == [
+        "invalid_frame",
+        "kis_frame_count",
+    ]
+    assert detail["warnings"] == []
+
+
 def test_valid_mixed_export_returns_a_revalidated_pass_zip():
     response = client.post("/api/export", json=_valid_export_body())
 
@@ -295,3 +458,15 @@ def test_existing_status_endpoint_remains_available_in_dummy_mode():
     assert response.status_code == 200
     assert response.json()["ok"] is True
     assert response.json()["retriever"] == "dummy"
+
+
+def test_app_import_restores_dummy_mode_and_retrieval_module_state():
+    if _prior_use_dummy is _MISSING:
+        assert "AIC_USE_DUMMY" not in os.environ
+    else:
+        assert os.environ["AIC_USE_DUMMY"] == _prior_use_dummy
+
+    if _prior_retrieval_module is _MISSING:
+        assert "aic.retrieval" not in sys.modules
+    else:
+        assert sys.modules["aic.retrieval"] is _prior_retrieval_module

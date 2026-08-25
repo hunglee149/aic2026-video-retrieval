@@ -47,9 +47,11 @@ from ..submission import (
     GeneratedArchiveError,
     QueryDefinition,
     SubmissionValidationError,
+    ValidationIssue,
+    ValidationReport,
     write_validated_submission,
 )
-from ..submission.query_pack import parse_query_files, parse_query_zip
+from ..submission.query_pack import infer_task, parse_query_files, parse_query_zip
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +140,7 @@ class TranslateRequest(BaseModel):
 class ExportRow(BaseModel):
     query_id: str
     video_id: str
-    frames: list[int]
+    frames: list[object]
     answer: str = ""
 
 
@@ -156,7 +158,7 @@ class QueryManifestIn(BaseModel):
     task: str
     text: str
     source_name: str
-    n_events: int | None
+    n_events: object | None
     events_confirmed: bool
 
 
@@ -203,6 +205,81 @@ def _query_pack_response(result):
     report = result.to_dict()
     if not result.ok:
         raise HTTPException(status_code=422, detail=report)
+    return report
+
+
+def _validate_manifest(manifest: list[QueryDefinition]) -> ValidationReport:
+    report = ValidationReport()
+    seen_query_ids = set()
+
+    for query in manifest:
+        inferred_task = infer_task(query.query_id)
+        if (
+            not query.query_id
+            or Path(query.query_id).name != query.query_id
+            or "/" in query.query_id
+            or "\\" in query.query_id
+            or "\x00" in query.query_id
+        ):
+            report.errors.append(
+                ValidationIssue(
+                    "unsafe_query_id",
+                    "Query ID must be a non-empty filename without a path",
+                    query_id=query.query_id,
+                )
+            )
+
+        if inferred_task is None:
+            report.errors.append(
+                ValidationIssue(
+                    "invalid_task_suffix",
+                    f"Query ID {query.query_id!r} must end with -kis, -qa, or -trake",
+                    query_id=query.query_id,
+                )
+            )
+
+        if query.task not in {"kis", "qa", "trake"}:
+            report.errors.append(
+                ValidationIssue(
+                    "invalid_manifest_task",
+                    f"Manifest task must be kis, qa, or trake; got {query.task!r}",
+                    query_id=query.query_id,
+                )
+            )
+        elif inferred_task is not None and inferred_task != query.task:
+            report.errors.append(
+                ValidationIssue(
+                    "manifest_task_mismatch",
+                    f"Query ID suffix implies {inferred_task!r}, not {query.task!r}",
+                    query_id=query.query_id,
+                )
+            )
+
+        if query.query_id in seen_query_ids:
+            report.errors.append(
+                ValidationIssue(
+                    "duplicate_query_id",
+                    f"Duplicate query ID: {query.query_id}",
+                    query_id=query.query_id,
+                )
+            )
+        else:
+            seen_query_ids.add(query.query_id)
+
+        if query.task == "trake" and query.events_confirmed:
+            if (
+                not isinstance(query.n_events, int)
+                or isinstance(query.n_events, bool)
+                or query.n_events <= 0
+            ):
+                report.errors.append(
+                    ValidationIssue(
+                        "invalid_trake_event_count",
+                        "Confirmed TRAKE query requires a positive event count",
+                        query_id=query.query_id,
+                    )
+                )
+
     return report
 
 
@@ -461,6 +538,10 @@ def export_submission(req: ExportRequest):
     """Validate operator rows and return a reparsed PASS submission ZIP."""
     manifest = [QueryDefinition(**query.model_dump()) for query in req.manifest]
     rows = [row.model_dump() for row in req.rows]
+
+    manifest_report = _validate_manifest(manifest)
+    if not manifest_report.ok:
+        raise HTTPException(status_code=422, detail=manifest_report.to_dict())
 
     with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
         tmp_path = tmp.name
