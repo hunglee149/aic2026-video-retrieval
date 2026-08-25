@@ -165,8 +165,11 @@
           <!-- Frame picker -->
           <div class="detail-section">
             <div class="detail-section-title">Chọn frame</div>
-            <div class="frame-picker-row">
+            <div class="frame-picker-row" id="frame-picker-single-row">
               <input type="number" id="frame-input" placeholder="Frame index" min="0"/>
+            </div>
+            <div id="frame-picker-trake-container" style="display:none; flex-direction:column; gap:6px;">
+              <!-- Dynamic event slots go here -->
             </div>
           </div>
 
@@ -329,34 +332,50 @@
          ============================================================ -->
     <div class="view" id="view-export">
       <div class="export-grid">
-        <!-- Left: Summary -->
-        <div class="export-card">
-          <div class="export-card-header">
-            <span>📋</span>
-            <h2>Tóm tắt kết quả</h2>
-            <div class="topbar-spacer"></div>
-            <span class="badge badge-gray" id="export-query-count">0 queries</span>
+        <!-- Left column -->
+        <div style="display:flex; flex-direction:column; gap:16px; min-width:0; flex:1;">
+          <!-- Left: Summary -->
+          <div class="export-card">
+            <div class="export-card-header">
+              <span>📋</span>
+              <h2>Tóm tắt kết quả</h2>
+              <div class="topbar-spacer"></div>
+              <span class="badge badge-gray" id="export-query-count">0 queries</span>
+            </div>
+            <div class="export-card-body">
+              <div id="export-alert"></div>
+              <table class="summary-table" id="export-table">
+                <thead>
+                  <tr>
+                    <th>Query ID</th>
+                    <th>Task</th>
+                    <th>Chi tiết đáp án</th>
+                    <th>Trạng thái</th>
+                    <th>Hành động</th>
+                  </tr>
+                </thead>
+                <tbody id="export-tbody">
+                  <tr>
+                    <td colspan="5" style="text-align:center;color:var(--text-muted);padding:32px">
+                      Chưa có kết quả. Hãy tìm kiếm và xác nhận lựa chọn trước.
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
-          <div class="export-card-body">
-            <div id="export-alert"></div>
-            <table class="summary-table" id="export-table">
-              <thead>
-                <tr>
-                  <th>Query ID</th>
-                  <th>Task</th>
-                  <th>Video</th>
-                  <th>Frames</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody id="export-tbody">
-                <tr>
-                  <td colspan="5" style="text-align:center;color:var(--text-muted);padding:32px">
-                    Chưa có kết quả. Hãy tìm kiếm và xác nhận lựa chọn trước.
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+
+          <!-- Review Content Card -->
+          <div class="export-card" id="export-review-card" style="display:none;">
+            <div class="export-card-header">
+              <span>🖼️</span>
+              <h2>Xem lại chi tiết: <span id="review-query-id" style="color:var(--purple-light)"></span></h2>
+              <div class="topbar-spacer"></div>
+              <span class="badge badge-purple" id="review-task-badge">KIS</span>
+            </div>
+            <div class="export-card-body" id="review-content-body">
+              <!-- Will be populated by JS -->
+            </div>
           </div>
         </div>
 
