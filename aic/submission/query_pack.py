@@ -15,7 +15,7 @@ MAX_QUERY_FILE_BYTES = 1024 * 1024
 MAX_QUERY_PACK_BYTES = 10 * 1024 * 1024
 EVENT_COUNT_OVERRIDES = {"query-p1-16-trake": 3}
 
-_TASK_SUFFIX = re.compile(r"[-_](kis|qa|trake)$", re.IGNORECASE)
+_TASK_SUFFIX = re.compile(r"[-_](kis|qa|trake)\Z", re.IGNORECASE)
 _EVENT_COUNT = re.compile(
     r"\b(\d+)\s+(?:events?|sự\s+kiện)\b", re.IGNORECASE
 )

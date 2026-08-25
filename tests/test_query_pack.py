@@ -73,6 +73,7 @@ def test_infer_task_requires_a_terminal_delimited_suffix():
     assert infer_task("query_p1_2_QA") == "qa"
     assert infer_task("query-p1-3-trake-extra") is None
     assert infer_task("query-p1-4-kiss") is None
+    assert infer_task("query-p1-5-kis\n") is None
     assert infer_task("trake") is None
 
 
