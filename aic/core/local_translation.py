@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import os
+import sys
 import threading
 from functools import lru_cache
 
@@ -11,6 +13,40 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "Helsinki-NLP/opus-mt-vi-en"
 _MODEL_LOAD_LOCK = threading.Lock()
+
+# Marian/OPUS-MT dựng tokenizer bằng SentencePiece. Thiếu gói này thì
+# transformers không báo "thiếu sentencepiece" mà ném ra "Unrecognized
+# configuration class MarianConfig" kèm danh sách vài trăm tên class — đọc xong
+# vẫn không biết phải làm gì. Nên phải tự dịch lỗi đó ra tiếng người.
+_TOKENIZER_DEPENDENCIES = ("sentencepiece", "sacremoses")
+
+
+def _missing_tokenizer_dependencies() -> list[str]:
+    return [
+        name
+        for name in _TOKENIZER_DEPENDENCIES
+        if importlib.util.find_spec(name) is None
+    ]
+
+
+def _dependency_error(model_name: str, exc: Exception) -> RuntimeError | None:
+    """Đổi lỗi khó hiểu của transformers thành hướng dẫn cụ thể.
+
+    Trả ``None`` nếu không thiếu gói nào — khi đó phải để lỗi gốc nổi lên,
+    không che nó bằng một thông báo sai.
+    """
+    missing = _missing_tokenizer_dependencies()
+    if not missing:
+        return None
+    packages = " ".join(missing)
+    return RuntimeError(
+        f"Không dựng được tokenizer cho {model_name}: thiếu {', '.join(missing)}.\n"
+        f"Python đang chạy: {sys.executable}\n"
+        f"Cài bằng: {sys.executable} -m pip install {packages}\n"
+        f"Rồi khởi động lại server. "
+        f"(Nếu bạn dùng virtualenv, kiểm tra xem đã cài đúng vào env đó chưa — "
+        f"lỗi gốc của transformers chỉ ghi 'Unrecognized configuration class'.)"
+    )
 
 
 class LocalTranslator:
@@ -31,7 +67,13 @@ class LocalTranslator:
         self.model_name = model_name
         self.device = torch.device(device)
         self._torch = torch
-        self._tokenizer = AutoTokenizer.from_pretrained(model_name)
+        try:
+            self._tokenizer = AutoTokenizer.from_pretrained(model_name)
+        except Exception as exc:
+            friendly = _dependency_error(model_name, exc)
+            if friendly is not None:
+                raise friendly from exc
+            raise
         self._model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
         self._model.to(self.device)
         self._model.eval()
