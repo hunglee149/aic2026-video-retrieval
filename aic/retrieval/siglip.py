@@ -1,64 +1,50 @@
-"""SigLIP retriever — tìm keyframe bằng SigLIP2 embeddings.
+"""SigLIP2 retriever — kênh visual thứ hai bên cạnh CLIP.
 
-Tương tự clip.py nhưng dùng SigLIP2 text encoder từ HuggingFace transformers.
-SigLIP2 cho embedding ~1152-dim, mạnh hơn CLIP ở semantic matching.
+**Model phải khớp cách index được dựng.** Index ``siglip_faiss.index`` trong repo
+này (177.321 vector, 1152 chiều) được sinh bởi notebook
+``drive/notebooks/trake_indexing.ipynb`` bằng::
 
-Usage:
-    retriever = build_siglip_retriever("local/siglip_faiss.index", "local/siglip_metadata.json")
-    candidates = retriever.search(query, k=100)
+    open_clip.create_model_from_pretrained('hf-hub:timm/ViT-SO400M-14-SigLIP2')
+
+Nên query cũng phải đi qua đúng model đó qua open_clip. Dùng
+``transformers.SiglipTextModel`` với ``google/siglip2-*`` là một implementation
+khác: nó vẫn cho ra vector 1152 chiều và vẫn search được, nhưng không cùng
+embedding space nên kết quả là rác im lặng. Số chiều trùng nhau không đủ để kết
+luận là cùng model — vì thế build sẽ đối chiếu dimension và fail rõ ràng.
+
+Cấu hình::
+
+    AIC_SIGLIP_INDEX_PATH   đường dẫn siglip_faiss.index
+    AIC_SIGLIP_META_PATH    đường dẫn siglip_metadata.json
+    AIC_SIGLIP_MODEL        mặc định hf-hub:timm/ViT-SO400M-14-SigLIP2
+    AIC_SIGLIP_DEVICE       auto | cuda | cpu
+    AIC_HF_CACHE_DIR        (tuỳ chọn) thư mục cache HuggingFace
+    AIC_DISABLE_NEURAL      (tuỳ chọn) =1 để tắt mọi model neural
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
-import numpy as np
-
+from .encoders import get_open_clip_encoder, probe_dim
 from .faiss_retriever import FaissRetriever
 
 logger = logging.getLogger(__name__)
 
-# SigLIP2 model name on HuggingFace
-DEFAULT_SIGLIP_MODEL = "google/siglip2-base-patch16-224"
-
-_siglip_cache: dict = {}
-
-
-def _get_siglip_encoder(model_name: str = DEFAULT_SIGLIP_MODEL):
-    """Load SigLIP text encoder, cache kết quả."""
-    if model_name not in _siglip_cache:
-        import torch
-        from transformers import AutoModel, AutoTokenizer
-
-        logger.info("Loading SigLIP model: %s", model_name)
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        model = AutoModel.from_pretrained(model_name)
-        model.eval()
-
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model = model.to(device)
-        logger.info("  → SigLIP on %s", device)
-
-        _siglip_cache[model_name] = (model, tokenizer, device)
-
-    return _siglip_cache[model_name]
+DEFAULT_SIGLIP_MODEL = os.environ.get(
+    "AIC_SIGLIP_MODEL", "hf-hub:timm/ViT-SO400M-14-SigLIP2"
+)
+DEFAULT_SIGLIP_DEVICE = os.environ.get("AIC_SIGLIP_DEVICE", "auto")
 
 
-def make_siglip_encode_fn(model_name: str = DEFAULT_SIGLIP_MODEL):
-    """Tạo hàm encode text → numpy vector cho SigLIP."""
-    import torch
-
-    def encode(text: str) -> np.ndarray:
-        model, tokenizer, device = _get_siglip_encoder(model_name)
-        inputs = tokenizer(
-            [text], return_tensors="pt", padding=True, truncation=True
-        ).to(device)
-        with torch.no_grad():
-            text_features = model.get_text_features(**inputs)
-            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-        return text_features.cpu().numpy().flatten()
-
+def make_siglip_encode_fn(
+    model_name: str = DEFAULT_SIGLIP_MODEL,
+    device_preference: str = DEFAULT_SIGLIP_DEVICE,
+):
+    """Hàm encode text → numpy vector 1152 chiều đã normalize."""
+    encode, _info = get_open_clip_encoder(model_name, None, device_preference)
     return encode
 
 
@@ -66,18 +52,23 @@ def build_siglip_retriever(
     index_path: str | Path,
     metadata_path: str | Path,
     model_name: str = DEFAULT_SIGLIP_MODEL,
+    device_preference: str = DEFAULT_SIGLIP_DEVICE,
 ) -> FaissRetriever:
-    """Tạo SigLIP retriever sẵn sàng search.
-
-    Parameters
-    ----------
-    index_path : path tới ``siglip_faiss.index``
-    metadata_path : path tới ``siglip_metadata.json``
-    """
-    encode_fn = make_siglip_encode_fn(model_name)
-    return FaissRetriever(
+    """Tạo SigLIP retriever, đã kiểm tra index khớp encoder."""
+    encode, info = get_open_clip_encoder(model_name, None, device_preference)
+    dim = probe_dim(encode)
+    logger.info(
+        "SigLIP encoder: model=%s device=%s dim=%d",
+        info["model"],
+        info["device"],
+        dim,
+    )
+    retriever = FaissRetriever(
         index_path=index_path,
         metadata_path=metadata_path,
-        encode_fn=encode_fn,
+        encode_fn=encode,
         name="siglip",
+        expected_dim=dim,
     )
+    retriever.encoder_info = dict(info, dim=dim)
+    return retriever

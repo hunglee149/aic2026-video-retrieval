@@ -21,6 +21,10 @@ class Query:
     objects: list[str] = field(default_factory=list)
     task: str = "kis"  # kis | qa | trake
     n_events: int = 1
+    # Tuỳ chọn, do UI gửi xuống. None = để retriever tự quyết định mặc định;
+    # backend phải chạy được khi cả hai trường này để nguyên mặc định.
+    modalities: list[str] | None = None
+    weights: dict[str, float] = field(default_factory=dict)
 
     def for_clip(self) -> str:
         return self.text_en or self.text_vi

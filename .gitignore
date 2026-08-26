@@ -1,7 +1,9 @@
-ata/
+data/
 drive/
 keyframes/
+local/
 outputs/
+
 *.npy
 *.npz
 *.index
@@ -12,15 +14,25 @@ outputs/
 *.jpeg
 *.zip
 
+*.bak
+*.tmp
+
+.env
+.env.*
+!.env.example
+
 __pycache__/
 *.py[cod]
-.venv/
-venv/
+*.egg-info/
 .pytest_cache/
 .ipynb_checkpoints/
-*.egg-info/
+.venv/
+venv/
+node_modules/
 
 .vscode/
 .idea/
 .DS_Store
-local/
+Thumbs.db
+desktop.ini
+.superpowers/

@@ -4,6 +4,16 @@ import zipfile
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
+from .query_pack import QueryDefinition
+from .validator import (
+    GeneratedArchiveError,
+    SubmissionValidationError,
+    ValidationReport,
+    normalize_submission_rows,
+    validate_submission,
+    validate_submission_zip,
+)
+
 MAX_ROWS_PER_QUERY = 100
 
 
@@ -61,3 +71,31 @@ def write_query_submission(
 ) -> str:
     """Convenience entry point for one query's list of submission rows."""
     return write_submission({query_id: rows}, out_path)
+
+
+def write_validated_submission(
+    manifest: Sequence[QueryDefinition],
+    rows: Iterable[Mapping[str, object]],
+    out_path: str | Path,
+) -> ValidationReport:
+    """Validate operator rows, write the archive, then validate it again."""
+    normalized = normalize_submission_rows(rows)
+    report = validate_submission(manifest, normalized)
+    if not report.ok:
+        raise SubmissionValidationError(report)
+
+    rows_by_query: dict[str, list[list[object]]] = {
+        query.query_id: [] for query in manifest
+    }
+    for row in normalized:
+        query_id = row["query_id"]
+        csv_row = [row["video_id"], *[str(frame) for frame in row["frames"]]]
+        if next(query for query in manifest if query.query_id == query_id).task == "qa":
+            csv_row.append(row["answer"])
+        rows_by_query[query_id].append(csv_row)
+
+    write_submission(rows_by_query, out_path)
+    archive_report = validate_submission_zip(out_path, manifest)
+    if not archive_report.ok:
+        raise GeneratedArchiveError(archive_report)
+    return archive_report

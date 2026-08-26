@@ -70,6 +70,37 @@ Chạy UI
 python -m uvicorn aic.ui.app:app --reload --port 8000
 ```
 
+### Dịch query tiếng Việt bằng model local
+
+Mặc định UI dùng `Helsinki-NLP/opus-mt-vi-en` để dịch query sang tiếng Anh
+cho CLIP. Không cần `GEMINI_API_KEY`. Lần dịch đầu tiên Hugging Face sẽ tải
+model về cache của máy; các lần chạy sau dùng lại cache đó.
+
+Thiết bị được chọn tự động: CUDA nếu PyTorch nhận GPU, ngược lại dùng CPU.
+Có thể ép thiết bị khi chạy:
+
+```bash
+AIC_TRANSLATION_DEVICE=cuda python -m uvicorn aic.ui.app:app --reload --port 8000
+```
+
+Các biến cấu hình tùy chọn:
+
+- `AIC_TRANSLATION_DEVICE=auto|cuda|cpu`
+- `AIC_TRANSLATION_MODEL=Helsinki-NLP/opus-mt-vi-en`
+
+## Xuất submission đã kiểm tra
+
+Dùng **query pack đầy đủ** BTC cung cấp: nạp file ZIP, hoặc nạp toàn bộ các
+file TXT của một pack. Chế độ một TXT chỉ dành cho phát triển/kiểm thử, không
+dùng cho bài nộp chính thức. Với từng query TRAKE, kiểm tra lại số event, nhập
+số đó và bấm xác nhận trước khi chọn frame.
+
+Trong màn hình xuất, xử lý mọi lỗi hiện trong validation report (mỗi query cần
+có dòng hợp lệ). Chỉ tải `submission.zip` khi export trả về trạng thái **PASS**;
+hệ thống kiểm tra lại ZIP vừa tạo trước khi trả file. Kiểm tra này hỗ trợ bắt
+lỗi định dạng và không thay thế submission validator chính thức của BTC — luôn
+chạy validator đó trước khi nộp.
+
 ## Viết tài liệu
 
 Mỗi người một file trong `docs/`: phần này làm gì, nhận
