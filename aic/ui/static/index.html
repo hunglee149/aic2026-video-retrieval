@@ -53,7 +53,9 @@
           <label class="label" for="query-input">Câu hỏi (Tiếng Việt)</label>
           <textarea id="query-input" rows="4"
             placeholder="Nhập mô tả cảnh cần tìm...&#10;Ví dụ: Người phụ nữ mặc áo đỏ đang đi dạo trong công viên lúc hoàng hôn"></textarea>
-          <input type="file" id="query-file-upload" accept=".txt" onchange="handleQueryFileUpload(event)" style="margin-top: 8px; font-size: 12px; color: var(--text-muted); width: 100%;" />
+          <input type="file" id="query-file-upload" accept=".zip,.txt" multiple onchange="handleQueryFileUpload(event)" style="margin-top: 8px; font-size: 12px; color: var(--text-muted); width: 100%;" />
+          <div class="query-pack-hint">Nạp một ZIP hoặc một/nhiều file TXT.</div>
+          <div class="query-manifest-list" id="query-manifest-list" aria-label="Danh sách query trong pack"></div>
         </div>
 
         <div class="sidebar-section">
@@ -84,6 +86,10 @@
         <div class="sidebar-section" id="n-events-section" style="display:none">
           <label class="label" for="n-events-input">Số events (TRAKE)</label>
           <input type="number" id="n-events-input" value="3" min="1" max="20"/>
+          <label class="trake-confirmation">
+            <input type="checkbox" id="trake-events-confirmed"/>
+            Đã xác nhận số events cho query này
+          </label>
         </div>
 
         <div class="sidebar-section">
@@ -344,6 +350,7 @@
             </div>
             <div class="export-card-body">
               <div id="export-alert"></div>
+              <div class="validation-report" id="validation-report" aria-live="polite"></div>
               <table class="summary-table" id="export-table">
                 <thead>
                   <tr>
@@ -433,6 +440,7 @@
 <!-- Toast container -->
 <div id="toast-container"></div>
 
-<script src="/static/main.js?v=6"></script>
+<script src="/static/submission_helpers.js?v=1"></script>
+<script src="/static/main.js?v=7"></script>
 </body>
 </html>

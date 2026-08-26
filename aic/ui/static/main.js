@@ -14,6 +14,9 @@ const state = {
   candidates: [],
   selected: null,
   selections: [],
+  manifest: [],
+  currentQueryId: null,
+  validationReport: null,
   gridMode: true,
 
   iterCandidates: [],
@@ -32,6 +35,7 @@ const state = {
 // ---------------------------------------------------------------------------
 
 function $(id) { return document.getElementById(id); }
+const submissionHelpers = window.AICSubmissionHelpers;
 
 function toast(msg, type = 'info') {
   const el = document.createElement('div');
@@ -76,6 +80,110 @@ function candidateKey(c) {
   return `${c.video_id}__${c.representative_frames[0] ?? c.start_frame}`;
 }
 
+function currentManifestItem() {
+  return state.manifest.find((item) => item.query_id === state.currentQueryId) || null;
+}
+
+function currentQueryId() {
+  return state.currentQueryId || $('query-id-input').value.trim() || 'q1';
+}
+
+function currentTrakeEvents() {
+  const item = currentManifestItem();
+  return item && item.task === 'trake' ? item.n_events : parseInt($('n-events-input').value, 10);
+}
+
+function saveManifest() {
+  localStorage.setItem('aic_manifest', JSON.stringify(state.manifest));
+}
+
+function loadManifest() {
+  const data = localStorage.getItem('aic_manifest');
+  if (!data) return;
+  try {
+    state.manifest = JSON.parse(data);
+  } catch (e) {
+    console.error('Failed to load manifest:', e);
+    state.manifest = [];
+  }
+}
+
+function renderManifestList() {
+  const list = $('query-manifest-list');
+  if (!list) return;
+  list.innerHTML = '';
+  state.manifest.forEach((item) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `query-manifest-item${item.query_id === state.currentQueryId ? ' active' : ''}`;
+    button.innerHTML = `<span class="manifest-task">${item.task.toUpperCase()}</span>${item.query_id}`;
+    button.addEventListener('click', () => selectManifestQuery(item.query_id));
+    list.appendChild(button);
+  });
+}
+
+function selectManifestQuery(queryId) {
+  const item = state.manifest.find((entry) => entry.query_id === queryId);
+  if (!item) return;
+  state.currentQueryId = item.query_id;
+  $('query-id-input').value = item.query_id;
+  $('export-query-id').value = item.query_id;
+  $('query-input').value = item.text;
+  $('n-events-input').value = item.task === 'trake' && item.n_events ? item.n_events : 1;
+  $('trake-events-confirmed').checked = Boolean(item.events_confirmed);
+  selectTask(item.task);
+  renderManifestList();
+  renderSelectionsList();
+}
+
+function updateSelectedTrakeState(confirmEvents) {
+  const item = currentManifestItem();
+  if (!item || item.task !== 'trake') return;
+  const nEvents = parseInt($('n-events-input').value, 10);
+  if (!Number.isInteger(nEvents) || nEvents < 1) {
+    $('trake-events-confirmed').checked = false;
+    toast('Số events TRAKE phải lớn hơn 0', 'warning');
+    return;
+  }
+  state.manifest = submissionHelpers.updateTrakeState(
+    state.manifest,
+    item.query_id,
+    nEvents,
+    Boolean(confirmEvents),
+  );
+  saveManifest();
+  renderManifestList();
+}
+
+function setValidationReport(report) {
+  state.validationReport = report && (report.errors?.length || report.warnings?.length) ? report : null;
+  renderValidationReport();
+}
+
+function renderValidationReport() {
+  const container = $('validation-report');
+  if (!container) return;
+  container.innerHTML = '';
+  if (!state.validationReport) return;
+  [['errors', 'Lỗi cần sửa'], ['warnings', 'Cảnh báo']].forEach(([kind, title]) => {
+    const groups = submissionHelpers.groupValidationIssues(state.validationReport[kind]);
+    Object.entries(groups).forEach(([queryId, messages]) => {
+      const group = document.createElement('div');
+      group.className = `validation-report-group ${kind}`;
+      const heading = document.createElement('strong');
+      heading.textContent = `${title}: ${queryId}`;
+      const list = document.createElement('ul');
+      messages.forEach((message) => {
+        const line = document.createElement('li');
+        line.textContent = message;
+        list.appendChild(line);
+      });
+      group.append(heading, list);
+      container.appendChild(group);
+    });
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Status check
 // ---------------------------------------------------------------------------
@@ -102,6 +210,10 @@ async function checkStatus() {
 // ---------------------------------------------------------------------------
 
 function switchView(view) {
+  if (view === 'iterative' && !submissionHelpers.canUseIterative(state.task)) {
+    toast('Iterative chỉ dùng cho KIS', 'warning');
+    view = 'search';
+  }
   document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
   document.querySelectorAll('.nav-tab').forEach(el => el.classList.remove('active'));
   const el = $(`view-${view}`);
@@ -116,6 +228,11 @@ function switchView(view) {
 // ---------------------------------------------------------------------------
 
 function selectTask(task) {
+  const current = currentManifestItem();
+  if (current && task !== current.task) {
+    toast(`Query pack này là ${current.task.toUpperCase()}`, 'warning');
+    task = current.task;
+  }
   state.task = task;
   ['kis', 'qa', 'trake'].forEach(t => {
     const pill = $(`pill-${t}`);
@@ -167,9 +284,9 @@ async function doSearch() {
   const text_vi = $('query-input').value.trim();
   if (!text_vi) { toast('Nhập câu hỏi', 'warning'); return; }
   const text_en = $('translated-text').value.trim();
-  const query_id = $('query-id-input').value.trim() || 'q1';
+  const query_id = currentQueryId();
   const k = parseInt($('topk-slider').value, 10);
-  const n_events = parseInt($('n-events-input').value, 10) || 1;
+  const n_events = currentTrakeEvents() || 1;
 
   setLoading('btn-search', true);
   $('candidates-grid').innerHTML = '<div class="spinner"><div class="spinner-ring"></div></div>';
@@ -310,7 +427,7 @@ function selectCandidate(idx) {
   if (vid) vid.style.display = 'none';
   placeholder.style.display = 'flex';
   
-  const queryId = $('query-id-input').value.trim() || 'q1';
+  const queryId = currentQueryId();
   let initialFrame = frameIdx;
   
   // Load initial frame from confirmed selection if exists
@@ -376,7 +493,7 @@ function selectCandidate(idx) {
     trakeContainer.style.display = 'flex';
     
     // Render dynamic event inputs
-    const n_events = parseInt($('n-events-input').value, 10) || 3;
+    const n_events = currentTrakeEvents() || 1;
     trakeContainer.innerHTML = '';
     
     const existingFrames = existing ? existing.frames : [];
@@ -445,7 +562,7 @@ function grabTrakeFrame(index, e) {
 function confirmSelection() {
   if (state.selected === null) return;
   const c = state.candidates[state.selected];
-  const queryId = $('query-id-input').value.trim() || 'q1';
+  const queryId = currentQueryId();
 
   if (state.task === 'kis') {
     const frameInput = parseInt($('frame-input').value, 10);
@@ -470,9 +587,9 @@ function confirmSelection() {
   else if (state.task === 'qa') {
     const frameInput = parseInt($('frame-input').value, 10);
     const frame = isNaN(frameInput) ? (c.representative_frames[0] ?? c.start_frame) + 1 : frameInput;
-    const answer = $('answer-input').value.trim();
+    const answer = submissionHelpers.prepareQaAnswer($('answer-input').value);
     
-    if (!answer) {
+    if (!answer.trim()) {
       toast('Vui lòng nhập câu trả lời cho Q&A!', 'warning');
       return;
     }
@@ -498,7 +615,11 @@ function confirmSelection() {
     toast(`Đã thêm ${c.video_id} f${frame} vào Q&A`, 'success');
   } 
   else if (state.task === 'trake') {
-    const n_events = parseInt($('n-events-input').value, 10) || 3;
+    const n_events = currentTrakeEvents();
+    if (!Number.isInteger(n_events) || n_events < 1) {
+      toast('Xác nhận số events TRAKE trước khi chọn frame', 'warning');
+      return;
+    }
     const frames = [];
     let hasMissing = false;
     
@@ -576,7 +697,7 @@ function moveSelection(index, direction) {
 
 function renderSelectionsList() {
   const list = $('selections-list');
-  const queryId = $('query-id-input').value.trim() || 'q1';
+  const queryId = currentQueryId();
   const querySelections = state.selections.filter(s => s.queryId === queryId);
   
   $('sel-count').textContent = querySelections.length;
@@ -619,6 +740,10 @@ function renderSelectionsList() {
 // ---------------------------------------------------------------------------
 
 function iterStart() {
+  if (!submissionHelpers.canUseIterative(state.task)) {
+    toast('Iterative chỉ dùng cho KIS', 'warning');
+    return;
+  }
   if (!state.candidates.length) {
     toast('Hãy tìm kiếm trước ở tab Tìm kiếm', 'warning');
     switchView('search');
@@ -651,7 +776,7 @@ function iterFinish() {
   ['btn-iter-prev', 'btn-iter-next', 'btn-iter-skip'].forEach(id => { $(id).disabled = true; });
   $('iter-status-badge').textContent = 'Hoàn thành';
 
-  const queryId = $('query-id-input').value.trim() || 'q1';
+  const queryId = currentQueryId();
   state.iterMatchedList.forEach(c => {
     const frame = c.representative_frames[0] ?? c.start_frame;
     const existing = state.selections.findIndex(s => s.video_id === c.video_id && s.queryId === queryId);
@@ -659,6 +784,7 @@ function iterFinish() {
       state.selections.push({ video_id: c.video_id, frames: [frame], answer: '', queryId, task: state.task, rank: c.rank });
     }
   });
+  saveSelections();
   renderSelectionsList();
   toast(`Iterative xong: ${state.iterMatchedList.length} matched, ${state.iterUnsureList.length} unsure`, 'success');
 }
@@ -795,6 +921,15 @@ function buildRoundProgress() {
 getQuerySummary;
 
 function getQuerySummary() {
+  if (state.manifest.length) {
+    return state.manifest.map((item) => ({
+      queryId: item.query_id,
+      task: item.task,
+      n_events: item.n_events,
+      events_confirmed: item.events_confirmed,
+      selections: state.selections.filter((selection) => selection.queryId === item.query_id),
+    }));
+  }
   const summary = {};
   state.selections.forEach(s => {
     if (!summary[s.queryId]) {
@@ -911,7 +1046,7 @@ function renderExportTable() {
 
   tbody.innerHTML = summary.map((q, idx) => {
     let detailsText = '';
-    let statusText = '<span class="badge badge-green">✓ Ready</span>';
+    let statusText = q.selections.length ? '<span class="badge badge-green">✓ Ready</span>' : '<span class="badge badge-amber">⚠️ Chưa có dòng</span>';
     
     if (q.task === 'kis') {
       detailsText = `${q.selections.length} cảnh (KIS)`;
@@ -919,8 +1054,8 @@ function renderExportTable() {
       detailsText = `${q.selections.length} câu trả lời (QA)`;
     } else if (q.task === 'trake') {
       detailsText = `${q.selections.length} chuỗi sự kiện (TRAKE)`;
-      const n_events = parseInt($('n-events-input').value, 10) || 3;
-      const incomplete = q.selections.some(s => s.frames.length < n_events);
+      const n_events = q.n_events;
+      const incomplete = !q.events_confirmed || !Number.isInteger(n_events) || q.selections.some(s => s.frames.length !== n_events);
       if (incomplete) {
         statusText = `<span class="badge badge-amber" title="Có dòng chưa đủ ${n_events} sự kiện">⚠️ Thiếu event</span>`;
       }
@@ -946,10 +1081,14 @@ function renderExportTable() {
 
 function refreshPreview() {
   const preview = $('csv-preview');
-  if (!state.selections.length) { preview.textContent = '— chưa có dữ liệu —'; return; }
+  const manifestIds = new Set(state.manifest.map((item) => item.query_id));
+  const selections = state.manifest.length
+    ? state.selections.filter((selection) => manifestIds.has(selection.queryId))
+    : state.selections;
+  if (!selections.length) { preview.textContent = '— chưa có dữ liệu —'; return; }
   
   const byQuery = {};
-  state.selections.forEach(s => {
+  selections.forEach(s => {
     if (!byQuery[s.queryId]) byQuery[s.queryId] = [];
     byQuery[s.queryId].push(s);
   });
@@ -960,8 +1099,8 @@ function refreshPreview() {
     selections.forEach(s => {
       const vid = s.video_id.replace(/\.mp4$/, '');
       const parts = [vid, ...s.frames.map(String)];
-      if (s.answer) {
-        let ans = s.answer;
+      if (s.task === 'qa') {
+        let ans = String(s.answer ?? '');
         if (ans.includes(',') || ans.includes('"') || ans.includes('\n')) {
           ans = `"${ans.replace(/"/g, '""')}"`;
         }
@@ -976,17 +1115,36 @@ function refreshPreview() {
 }
 
 async function doExport() {
-  if (!state.selections.length) { toast('Chưa có lựa chọn để export', 'warning'); return; }
-  const rows = state.selections.map(s => ({ query_id: s.queryId || 'q1', video_id: s.video_id, frames: s.frames, answer: s.answer || '' }));
+  if (!state.manifest.length) { toast('Nạp query pack trước khi export', 'warning'); return; }
+  const manifestIds = new Set(state.manifest.map((item) => item.query_id));
+  const rows = state.selections
+    .filter((selection) => manifestIds.has(selection.queryId))
+    .map((selection) => ({
+      query_id: selection.queryId,
+      video_id: selection.video_id,
+      frames: selection.frames,
+      answer: String(selection.answer ?? ''),
+    }));
 
   setLoading('btn-export', true);
   try {
     const res = await fetch('/api/export', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task: state.task, rows }),
+      body: JSON.stringify({ manifest: state.manifest, rows }),
     });
-    if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Export failed'); }
+    if (!res.ok) {
+      const payload = await res.json();
+      setValidationReport(payload.detail || payload);
+      toast('Validation export thất bại', 'error');
+      return;
+    }
+    if (res.headers.get('X-Validation-Status') !== 'PASS') {
+      setValidationReport({ errors: [{ message: 'Export không trả về trạng thái PASS' }], warnings: [] });
+      toast('Export không đạt PASS', 'error');
+      return;
+    }
+    setValidationReport(null);
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -995,7 +1153,8 @@ async function doExport() {
     URL.revokeObjectURL(url);
     toast('Đã tải xuống submission.zip', 'success');
   } catch (e) {
-    toast(e.message, 'error');
+    setValidationReport({ errors: [{ message: e.message || 'Không thể export submission' }], warnings: [] });
+    toast(e.message || 'Không thể export submission', 'error');
   } finally {
     setLoading('btn-export', false);
   }
@@ -1052,12 +1211,24 @@ document.addEventListener('keydown', (e) => {
 
 document.addEventListener('DOMContentLoaded', () => {
   loadSelections();
+  loadManifest();
   checkStatus();
   setInterval(checkStatus, 30000);
-  selectTask('kis');
+  if (state.manifest.length) selectManifestQuery(state.manifest[0].query_id);
+  else selectTask('kis');
   $('query-id-input').addEventListener('input', () => {
     $('export-query-id').value = $('query-id-input').value;
+    state.currentQueryId = null;
+    renderManifestList();
     renderSelectionsList();
+  });
+  $('n-events-input').addEventListener('change', () => {
+    if (currentManifestItem()?.task !== 'trake') return;
+    updateSelectedTrakeState(false);
+    if (state.selected !== null) selectCandidate(state.selected);
+  });
+  $('trake-events-confirmed').addEventListener('change', (event) => {
+    updateSelectedTrakeState(event.target.checked);
   });
 
   const vid = $('preview-vid');
@@ -1094,40 +1265,59 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 });
 
-// Xử lý upload file txt query
-function handleQueryFileUpload(event) {
-  const file = event.target.files[0];
-  if (!file) return;
+// Nạp query pack ZIP hoặc một/nhiều query TXT.
+async function handleQueryFileUpload(event) {
+  const files = Array.from(event.target.files || []);
+  if (!files.length) return;
+  const zipFiles = files.filter((file) => file.name.toLowerCase().endsWith('.zip'));
+  const textFiles = files.filter((file) => file.name.toLowerCase().endsWith('.txt'));
+  const invalidFiles = files.filter((file) => !zipFiles.includes(file) && !textFiles.includes(file));
 
-  const fileNameWithoutExt = file.name.replace(/\.[^/.]+$/, "");
-  const queryIdInput = document.getElementById('query-id-input');
-  if (queryIdInput) {
-    queryIdInput.value = fileNameWithoutExt;
-    const exportQueryId = document.getElementById('export-query-id');
-    if (exportQueryId) exportQueryId.value = fileNameWithoutExt;
-  }
-
-  // Tự động nhận diện loại task qua suffix
-  const nameLower = fileNameWithoutExt.toLowerCase();
-  let autoTask = 'kis';
-  if (nameLower.endsWith('kis') || nameLower.includes('-kis')) {
-    autoTask = 'kis';
-  } else if (nameLower.endsWith('qa') || nameLower.includes('-qa')) {
-    autoTask = 'qa';
-  } else if (nameLower.endsWith('trake') || nameLower.includes('-trake')) {
-    autoTask = 'trake';
-  }
-  selectTask(autoTask);
-
-  const reader = new FileReader();
-  reader.onload = function(e) {
-    const text = e.target.result;
-    const queryInput = document.getElementById('query-input');
-    if (queryInput) {
-      queryInput.value = text;
-      queryInput.dispatchEvent(new Event('input', { bubbles: true }));
-    }
+  if (invalidFiles.length || (zipFiles.length && (zipFiles.length !== 1 || textFiles.length))) {
+    setValidationReport({
+      errors: [{ message: 'Chỉ nhận một ZIP hoặc một/nhiều TXT; không trộn ZIP với TXT.' }],
+      warnings: [],
+    });
+    toast('Chỉ nhận một ZIP hoặc một/nhiều TXT', 'error');
     event.target.value = '';
-  };
-  reader.readAsText(file);
+    return;
+  }
+
+  try {
+    let response;
+    if (zipFiles.length === 1) {
+      response = await fetch('/api/query-pack/zip', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/zip' },
+        body: await zipFiles[0].arrayBuffer(),
+      });
+    } else {
+      response = await fetch('/api/query-pack/texts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          files: await Promise.all(textFiles.map(async (file) => ({ filename: file.name, content: await file.text() }))),
+        }),
+      });
+    }
+    const payload = await response.json();
+    const report = response.ok ? payload : payload.detail;
+    if (Array.isArray(report.manifest)) {
+      state.manifest = report.manifest.reduce(
+        (items, item) => submissionHelpers.upsertManifestItem(items, item),
+        [],
+      );
+      saveManifest();
+      if (state.manifest.length) selectManifestQuery(state.manifest[0].query_id);
+      else renderManifestList();
+    }
+    setValidationReport(report);
+    if (response.ok && report.ok) toast(`Đã nạp ${state.manifest.length} query`, 'success');
+    else toast('Query pack có lỗi validation', 'warning');
+  } catch (e) {
+    setValidationReport({ errors: [{ message: e.message || 'Không thể nạp query pack' }], warnings: [] });
+    toast(e.message || 'Không thể nạp query pack', 'error');
+  } finally {
+    event.target.value = '';
+  }
 }
