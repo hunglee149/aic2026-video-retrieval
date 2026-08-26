@@ -14,10 +14,16 @@ Quy ước:
 from .core.convert import to_answer, to_csv_row
 
 
-def retrieve_and_fuse(query, retrievers, fuse_fn, limit=100, exclude=frozenset()):
-    """Gọi mọi nguồn tìm kiếm rồi trộn lại thành một danh sách ứng viên."""
+def retrieve_and_fuse(
+    query, retrievers, fuse_fn, limit=100, exclude=frozenset(), fuse_kwargs=None
+):
+    """Gọi mọi nguồn tìm kiếm rồi trộn lại thành một danh sách ứng viên.
+
+    ``fuse_kwargs`` chuyển tiếp tuỳ chọn cho fusion (ví dụ ``weights``); để None
+    thì fusion dùng mặc định của nó.
+    """
     runs = [r.search(query, limit, exclude) for r in retrievers]
-    return fuse_fn(runs, limit=limit)
+    return fuse_fn(runs, limit=limit, **(fuse_kwargs or {}))
 
 
 def to_rows(query, candidates, chosen_frames=None, answers=None):

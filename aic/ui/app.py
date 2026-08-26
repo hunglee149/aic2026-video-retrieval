@@ -23,14 +23,16 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-# Load .env manually if exists (no dotenv dependency required)
+# Load .env manually if exists (no dotenv dependency required).
+# setdefault chứ không gán đè: biến môi trường truyền tường minh khi chạy lệnh
+# phải thắng file .env, đúng ngữ nghĩa dotenv thông thường.
 env_path = Path(".env")
 if env_path.exists():
     for _line in env_path.read_text(encoding="utf-8").splitlines():
         _line = _line.strip()
         if _line and not _line.startswith("#") and "=" in _line:
             _k, _v = _line.split("=", 1)
-            os.environ[_k.strip()] = _v.strip().strip("'\"")
+            os.environ.setdefault(_k.strip(), _v.strip().strip("'\""))
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -66,7 +68,19 @@ KEYFRAMES_DIR = Path(os.environ.get("AIC_KEYFRAMES_DIR", "data/keyframes"))
 INDEX_PATH = Path(os.environ.get("AIC_INDEX_PATH", "local/clip_faiss.index"))
 META_PATH = Path(os.environ.get("AIC_META_PATH", "local/clip_metadata.json"))
 TEXT_INDEX_PATH = Path(os.environ.get("AIC_TEXT_INDEX_PATH", "data/input/input/index/text_search_index.pkl"))
+
+
+def _optional_path(name: str) -> Optional[Path]:
+    """Path từ env, hoặc None nếu chưa cấu hình (khác với 'cấu hình sai')."""
+    raw = os.environ.get(name, "").strip()
+    return Path(raw) if raw else None
+
+
+MAP_KEYFRAMES_DIR = _optional_path("AIC_MAP_KEYFRAMES_DIR")
+SIGLIP_INDEX_PATH = _optional_path("AIC_SIGLIP_INDEX_PATH")
+SIGLIP_META_PATH = _optional_path("AIC_SIGLIP_META_PATH")
 USE_DUMMY = os.environ.get("AIC_USE_DUMMY", "0") == "1"
+DISABLE_NEURAL = os.environ.get("AIC_DISABLE_NEURAL", "0").strip() == "1"
 
 # ---------------------------------------------------------------------------
 # App
@@ -113,47 +127,133 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 
 # ---------------------------------------------------------------------------
-# Lazy retriever loader
+# Retriever registry
+#
+# Quy tắc: dummy CHỈ được dùng khi AIC_USE_DUMMY=1. Ở chế độ production, nguồn
+# nào hỏng thì nguồn đó mang trạng thái "error" và các nguồn còn lại vẫn chạy;
+# không bao giờ âm thầm thay bằng dữ liệu giả, vì kết quả giả trông y hệt kết
+# quả thật trên UI và sẽ đi thẳng vào bài nộp.
 # ---------------------------------------------------------------------------
 
 import threading
 
-_retrievers = []
+_retrievers: list = []
+_retriever_status: list[dict] = []
 _retriever_lock = threading.Lock()
 
-def get_retrievers():
-    global _retrievers
+
+def _slot(name: str, state: str, detail: str, error: Optional[str] = None) -> dict:
+    return {"name": name, "state": state, "detail": detail, "error": error}
+
+
+def _load_source(name: str, paths, factory, disabled_reason: Optional[str] = None):
+    """Nạp một nguồn, trả về ``(retriever hoặc None, slot trạng thái)``."""
+    configured = [p for p in paths if p is not None]
+    if len(configured) != len(paths):
+        return None, _slot(name, "disabled", f"{name}: chưa cấu hình đường dẫn")
+
+    missing = [str(p) for p in configured if not Path(p).exists()]
+    if missing:
+        reason = "không tìm thấy: " + ", ".join(missing)
+        logger.warning("[%s] %s", name, reason)
+        return None, _slot(name, "error", f"{name}: {reason}", reason)
+
+    if disabled_reason:
+        return None, _slot(name, "disabled", f"{name}: {disabled_reason}")
+
+    try:
+        logger.info("Loading %s retriever...", name)
+        retriever = factory()
+    except Exception as exc:  # nguồn hỏng không được kéo sập cả hệ thống
+        reason = f"{type(exc).__name__}: {exc}"
+        logger.error("[%s] load thất bại — %s", name, reason)
+        detail = f"{name}: lỗi khi nạp {', '.join(str(p) for p in configured)}"
+        return None, _slot(name, "error", detail, reason)
+
+    describe = getattr(retriever, "describe", None)
+    detail = describe() if callable(describe) else name
+    logger.info("[%s] ready — %s", name, detail)
+    return retriever, _slot(name, "ready", detail)
+
+
+def build_retriever_registry(
+    *,
+    use_dummy: bool,
+    clip_index,
+    clip_meta,
+    siglip_index,
+    siglip_meta,
+    text_index,
+    dummy_module,
+    disable_neural: bool = False,
+):
+    """Dựng danh sách retriever + trạng thái từng nguồn. Hàm thuần, dễ test."""
+    if use_dummy:
+        logger.info("AIC_USE_DUMMY=1 — dùng dummy retrieval")
+        # detail giữ đúng chuỗi "dummy": UI dùng `data.retriever === 'dummy'`
+        # để bật badge demo, đổi chuỗi này là làm hỏng chỉ báo đó.
+        return [dummy_module], [_slot("dummy", "ready", "dummy")]
+
+    neural_off = "AIC_DISABLE_NEURAL=1" if disable_neural else None
+    retrievers: list = []
+    statuses: list[dict] = []
+
+    def register(name, paths, factory, disabled_reason=None):
+        retriever, slot = _load_source(name, paths, factory, disabled_reason)
+        if retriever is not None:
+            retrievers.append(retriever)
+        statuses.append(slot)
+
+    def _clip_factory():
+        from ..retrieval.clip import build_clip_retriever
+
+        return build_clip_retriever(clip_index, clip_meta)
+
+    def _siglip_factory():
+        from ..retrieval.siglip import build_siglip_retriever
+
+        return build_siglip_retriever(siglip_index, siglip_meta)
+
+    def _text_factory():
+        from ..retrieval.text_retriever import TextRetriever
+
+        return TextRetriever(text_index, name="bm25")
+
+    register("clip", (clip_index, clip_meta), _clip_factory, neural_off)
+    register("siglip", (siglip_index, siglip_meta), _siglip_factory, neural_off)
+    register("bm25", (text_index,), _text_factory)
+
+    if not retrievers:
+        logger.error(
+            "Không nạp được nguồn retrieval thật nào; /api/search sẽ trả lỗi."
+        )
+    return retrievers, statuses
+
+
+def _ensure_retrievers():
+    global _retrievers, _retriever_status
     with _retriever_lock:
-        if _retrievers:
-            return _retrievers
-        if USE_DUMMY:
-            logger.info("Using dummy retriever (set AIC_USE_DUMMY=0 for CLIP)")
-            _retrievers = [dummy]
-            return _retrievers
-            
-        try:
-            from ..retrieval.clip import build_clip_retriever
-            logger.info("Loading CLIP retriever...")
-            clip_retriever = build_clip_retriever(INDEX_PATH, META_PATH)
-            _retrievers.append(clip_retriever)
-            logger.info("CLIP retriever ready.")
-        except Exception as e:
-            logger.warning("CLIP load failed (%s), falling back to dummy", e)
-            _retrievers.append(dummy)
-            
-        try:
-            from ..retrieval.text_retriever import TextRetriever
-            if TEXT_INDEX_PATH.exists():
-                logger.info("Loading Text retriever (BM25)...")
-                text_retriever = TextRetriever(TEXT_INDEX_PATH, name="bm25")
-                _retrievers.append(text_retriever)
-                logger.info("Text retriever ready.")
-            else:
-                logger.warning("Text index not found at %s", TEXT_INDEX_PATH)
-        except Exception as e:
-            logger.warning("Text retriever load failed: %s", e)
-            
-        return _retrievers
+        if _retriever_status:
+            return _retrievers, _retriever_status
+        _retrievers, _retriever_status = build_retriever_registry(
+            use_dummy=USE_DUMMY,
+            clip_index=INDEX_PATH,
+            clip_meta=META_PATH,
+            siglip_index=SIGLIP_INDEX_PATH,
+            siglip_meta=SIGLIP_META_PATH,
+            text_index=TEXT_INDEX_PATH,
+            dummy_module=dummy,
+            disable_neural=DISABLE_NEURAL,
+        )
+        return _retrievers, _retriever_status
+
+
+def get_retrievers():
+    return _ensure_retrievers()[0]
+
+
+def get_retriever_status() -> list[dict]:
+    return _ensure_retrievers()[1]
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +269,9 @@ class SearchRequest(BaseModel):
     n_events: int = 1
     k: int = 100
     exclude: list[str] = []
+    # Tuỳ chọn — UI cũ không gửi hai trường này và vẫn phải chạy y như trước.
+    modalities: Optional[list[str]] = None
+    weights: dict[str, float] = {}
 
 
 class TranslateRequest(BaseModel):
@@ -336,23 +439,29 @@ def import_query_pack_texts(req: QueryPackTextsRequest):
 
 @app.get("/api/status")
 def status():
-    retrievers = get_retrievers()
-    retriever_names = []
-    for r in retrievers:
-        name = getattr(r, "NAME", getattr(r, "name", "unknown"))
-        if hasattr(r, "num_vectors"):
-            name = f"CLIP ({r.num_vectors:,} vectors)"
-        elif hasattr(r, "num_documents"):
-            name = f"BM25 ({r.num_documents:,} docs)"
-        elif r is dummy:
-            name = "dummy"
-        retriever_names.append(name)
-        
+    """Trạng thái từng nguồn retrieval + đường dẫn logical đang dùng."""
+    statuses = get_retriever_status()
+    ready = [s for s in statuses if s["state"] == "ready"]
+
+    if ready:
+        summary = " + ".join(s["detail"] for s in ready)
+    else:
+        summary = "không có nguồn retrieval nào sẵn sàng"
+
     return {
         "ok": True,
-        "retriever": " + ".join(retriever_names),
+        "retriever": summary,
+        "retrievers": statuses,
+        "ready_count": len(ready),
         "keyframes_dir": str(KEYFRAMES_DIR),
         "use_dummy": USE_DUMMY,
+        "paths": {
+            "clip_index": str(INDEX_PATH),
+            "clip_meta": str(META_PATH),
+            "siglip_index": str(SIGLIP_INDEX_PATH) if SIGLIP_INDEX_PATH else None,
+            "siglip_meta": str(SIGLIP_META_PATH) if SIGLIP_META_PATH else None,
+            "text_index": str(TEXT_INDEX_PATH),
+        },
     }
 
 
@@ -369,10 +478,21 @@ def translate(req: TranslateRequest):
 
 @app.post("/api/search")
 def search(req: SearchRequest):
-    """Tìm kiếm candidates bằng retriever hiện tại."""
+    """Tìm kiếm candidates bằng các retriever đang sẵn sàng."""
     retrievers = get_retrievers()
+    statuses = get_retriever_status()
+    if not retrievers:
+        # Thà báo lỗi còn hơn trả kết quả giả: ở production không có fallback.
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": "Không có nguồn retrieval nào sẵn sàng",
+                "retrievers": statuses,
+            },
+        )
+
     from ..core.query_processor import process_query
-    
+
     query = make_query(
         query_id=req.query_id,
         text_vi=req.text_vi,
@@ -380,10 +500,12 @@ def search(req: SearchRequest):
         task=req.task,
         n_events=req.n_events,
     )
-    
+    query.modalities = req.modalities
+    query.weights = dict(req.weights or {})
+
     # Dịch local và trích xuất object theo rule nếu UI chưa cung cấp text_en.
     query = process_query(query)
-    
+
     exclude = frozenset(req.exclude)
 
     try:
@@ -393,6 +515,7 @@ def search(req: SearchRequest):
             fuse_fn=fuse,
             limit=req.k,
             exclude=exclude,
+            fuse_kwargs={"weights": query.weights} if query.weights else None,
         )
     except Exception as e:
         logger.error("Search error: %s", e)
@@ -414,6 +537,7 @@ def _get_frame_mapping():
     
     retrievers = get_retrievers()
     _frame_to_n = {}
+    # Metadata CLIP và SigLIP cùng thứ tự nên map trùng nhau; gộp cả hai vẫn an toàn.
     for retriever in retrievers:
         if hasattr(retriever, "metadata") and retriever.metadata:
             for meta in retriever.metadata:
@@ -500,19 +624,117 @@ def _get_video_path(video_id: str):
         
     return None
 
+_video_fps: Optional[dict] = None
+_video_fps_source = "unknown"
+
+
+def _fps_from_map_keyframes() -> dict:
+    """fps chính xác đọc thẳng từ ``map-keyframes/<video_id>.csv`` của BTC."""
+    if MAP_KEYFRAMES_DIR is None or not MAP_KEYFRAMES_DIR.exists():
+        return {}
+    import csv as _csv
+
+    out: dict[str, float] = {}
+    for path in MAP_KEYFRAMES_DIR.rglob("*.csv"):
+        try:
+            with path.open(encoding="utf-8") as handle:
+                row = next(_csv.DictReader(handle), None)
+            if row and row.get("fps"):
+                out[path.stem] = float(row["fps"])
+        except Exception as exc:
+            logger.warning("Không đọc được fps từ %s: %s", path, exc)
+    if out:
+        logger.info("Đọc fps chính xác cho %d video từ %s", len(out), MAP_KEYFRAMES_DIR)
+    return out
+
+
+def _fps_from_metadata() -> dict:
+    """Suy fps từ metadata keyframe khi không có map-keyframes.
+
+    ``frame_idx = floor(pts_time * fps)`` nên mỗi keyframe cho một khoảng
+    ``[frame_idx/pts, (frame_idx+1)/pts)``. Giao tất cả các khoảng lại sẽ kẹp
+    fps chặt hơn nhiều so với chia đúng một điểm.
+
+    Đây là đường dự phòng: đo trên batch 1 thì sai số trung bình 5e-5 fps nhưng
+    trường hợp xấu nhất vẫn lệch ~0.012 fps, đủ để lệch hơn 20 frame ở phút thứ
+    30 — quá rộng cho TRAKE. Vì vậy nên cấu hình ``AIC_MAP_KEYFRAMES_DIR``.
+    """
+    lower: dict[str, float] = {}
+    upper: dict[str, float] = {}
+    for retriever in get_retrievers():
+        metadata = getattr(retriever, "metadata", None)
+        if not metadata:
+            continue
+        for meta in metadata:
+            pts = meta.get("pts_time")
+            frame = meta.get("frame_idx")
+            video_id = meta.get("video_id")
+            if not video_id or pts is None or frame is None:
+                continue
+            pts = float(pts)
+            if pts <= 0:
+                continue
+            frame = int(frame)
+            lower[video_id] = max(lower.get(video_id, 0.0), frame / pts)
+            upper[video_id] = min(upper.get(video_id, float("inf")), (frame + 1) / pts)
+
+    out: dict[str, float] = {}
+    for video_id, low in lower.items():
+        high = upper.get(video_id, float("inf"))
+        out[video_id] = round((low + high) / 2, 3) if high > low else round(low, 3)
+    if out:
+        logger.info("Suy ra fps cho %d video từ metadata keyframe", len(out))
+    return out
+
+
+def _get_video_fps_map() -> dict:
+    """fps từng video, ưu tiên nguồn chính xác nhất.
+
+    Vì sao phải đúng: UI tính frame nộp bài bằng ``currentTime * fps``. Dataset
+    có cả 25 / 26.44 / 29.97 / 30 fps, nên mặc định 25 cho một video 30 fps sẽ
+    lệch hàng trăm giây và nộp sai frame — mà sai frame là R-Score 0.
+    """
+    global _video_fps, _video_fps_source
+    if _video_fps is not None:
+        return _video_fps
+
+    _video_fps = _fps_from_map_keyframes()
+    _video_fps_source = "map_keyframes"
+    if not _video_fps:
+        _video_fps = _fps_from_metadata()
+        _video_fps_source = "keyframe_metadata"
+    return _video_fps
+
+
 @app.get("/api/video_info/{video_id}")
 def get_video_info(video_id: str):
     """Lấy thông tin video (fps)."""
     video_path = _get_video_path(video_id)
     if not video_path:
         raise HTTPException(status_code=404, detail="Video not found")
-        
-    import cv2
-    cap = cv2.VideoCapture(str(video_path))
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    cap.release()
-    
-    return {"fps": fps if fps > 0 else 25.0}
+
+    fps = _get_video_fps_map().get(video_id)
+    if fps and fps > 0:
+        return {"fps": fps, "source": _video_fps_source}
+
+    # OpenCV là tuỳ chọn; không cài cũng không sao.
+    try:
+        import cv2
+
+        cap = cv2.VideoCapture(str(video_path))
+        probed = cap.get(cv2.CAP_PROP_FPS)
+        cap.release()
+        if probed and probed > 0:
+            return {"fps": probed, "source": "opencv"}
+    except ImportError:
+        pass
+    except Exception as exc:
+        logger.warning("Đọc fps bằng OpenCV thất bại cho %s: %s", video_id, exc)
+
+    # Không đoán im lặng: nói rõ đây là giá trị dự phòng để operator biết mà
+    # kiểm tra lại frame trước khi nộp.
+    logger.warning("Không xác định được fps của %s; dùng tạm 25.0", video_id)
+    return {"fps": 25.0, "source": "fallback", "reliable": False}
 
 @app.get("/api/video/{video_id}")
 def get_video(video_id: str, request: Request):

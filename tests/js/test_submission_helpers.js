@@ -209,3 +209,33 @@ test('submission controls are visible in the baseline UI', () => {
   assert.match(html, /id="trake-events-confirmed"/);
   assert.match(html, /id="validation-report"/);
 });
+
+test('formats retrieval evidence into labelled rows for the operator panel', () => {
+  const rows = helpers.formatEvidence({
+    transcript_match: 'cảnh sát giao thông điều tiết',
+    doc_type: 'transcript_segment',
+    start_time: 60,
+    end_time: 63,
+  });
+  const byKey = Object.fromEntries(rows.map((r) => [r.key, r]));
+  assert.equal(byKey.transcript_match.label, 'Lời thoại (ASR)');
+  assert.equal(byKey.transcript_match.text, 'cảnh sát giao thông điều tiết');
+  assert.equal(byKey.time.text, '60.0s – 63.0s');
+  assert.equal(rows.some((r) => r.key === 'doc_type'), false);
+});
+
+test('joins list evidence and drops empty values', () => {
+  const rows = helpers.formatEvidence({
+    objects: ['Person', 'Car'],
+    ocr_match: '',
+    caption_match: null,
+  });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].text, 'Person, Car');
+});
+
+test('returns no evidence rows for empty or missing payloads', () => {
+  assert.deepEqual(helpers.formatEvidence(undefined), []);
+  assert.deepEqual(helpers.formatEvidence({}), []);
+  assert.deepEqual(helpers.formatEvidence({ keyframe_num: 12 }), []);
+});

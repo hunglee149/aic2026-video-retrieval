@@ -139,7 +139,47 @@
     return parts.join(' — ');
   }
 
+  // Nhãn hiển thị cho từng loại evidence backend trả về. Khoá lạ vẫn hiện
+  // được, chỉ là dùng chính tên khoá làm nhãn.
+  const EVIDENCE_LABELS = {
+    transcript_match: 'Lời thoại (ASR)',
+    ocr_match: 'Chữ trên hình (OCR)',
+    caption_match: 'Caption',
+    summary_match: 'Tóm tắt',
+    media_info_match: 'Thông tin video',
+    text_match: 'Văn bản',
+    caption: 'Caption',
+    objects: 'Vật thể',
+  };
+
+  // Khoá kỹ thuật, không phải bằng chứng để operator đọc.
+  const EVIDENCE_SKIP = new Set(['doc_type', 'keyframe_num', 'language']);
+
+  function formatEvidence(evidence) {
+    if (!evidence || typeof evidence !== 'object') return [];
+    const out = [];
+    for (const [key, value] of Object.entries(evidence)) {
+      if (EVIDENCE_SKIP.has(key)) continue;
+      if (value === null || value === undefined || value === '') continue;
+      if (key === 'start_time' || key === 'end_time') continue;
+      const label = EVIDENCE_LABELS[key] || key;
+      const text = Array.isArray(value) ? value.join(', ') : String(value);
+      if (!text) continue;
+      out.push({ key, label, text });
+    }
+    const start = evidence.start_time;
+    const end = evidence.end_time;
+    if (typeof start === 'number') {
+      const span = typeof end === 'number' && end !== start
+        ? `${start.toFixed(1)}s – ${end.toFixed(1)}s`
+        : `${start.toFixed(1)}s`;
+      out.push({ key: 'time', label: 'Mốc thời gian', text: span });
+    }
+    return out;
+  }
+
   return {
+    formatEvidence,
     prepareQaAnswer,
     unicodeCodePointLength,
     candidateToSubmissionFrame,

@@ -618,7 +618,25 @@ function selectCandidate(idx) {
   }
 
   const evidenceSection = $('detail-evidence-section');
-  if (evidenceSection) evidenceSection.style.display = 'none';
+  const evidenceText = $('detail-evidence-text');
+  if (evidenceSection && evidenceText) {
+    const rows = submissionHelpers.formatEvidence(c.evidence);
+    if (rows.length) {
+      evidenceSection.style.display = '';
+      evidenceText.replaceChildren();
+      for (const row of rows) {
+        const line = document.createElement('div');
+        const label = document.createElement('strong');
+        label.textContent = `${row.label}: `;
+        line.appendChild(label);
+        line.appendChild(document.createTextNode(row.text));
+        evidenceText.appendChild(line);
+      }
+    } else {
+      evidenceSection.style.display = 'none';
+      evidenceText.replaceChildren();
+    }
+  }
 
   if (state.task === 'trake') {
     $('frame-picker-single-row').style.display = 'none';

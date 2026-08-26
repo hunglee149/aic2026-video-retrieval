@@ -1,45 +1,93 @@
 # Fusion
 
-Module này fuse danh sách các ứng viên được trả về từ nhiều bộ máy tìm kiếm khác nhau, lọc các video trùng lặp và đảm bảo đầu ra luôn đủ số lượng kết quả yêu cầu (mặc định 100). Module được thiết kế để tối ưu hóa thứ hạng của các kết quả tốt nhất, đáp ứng mục tiêu đạt điểm cao ở các mốc R@1, R@5, R@20.
+Trộn kết quả từ nhiều retriever thành **một danh sách moment đã xếp hạng**, để
+tối ưu các mốc R@1, R@5, R@20, R@50, R@100 của BTC.
 
 ## Input / Output
 
-- **Input:** 
-  - `runs`: Danh sách kết quả từ nhiều retriever. Định dạng: `list[list[Candidate]]`.
-  - `limit`: Số lượng kết quả đầu ra tối đa cần lấy (mặc định 100).
-- **Output:** Trả về một `list[Candidate]` với độ dài chính xác bằng `limit`, đã trải qua các bước xử lý:
-  1. **Lọc trùng:** Đảm bảo mỗi `video_id` chỉ xuất hiện 1 lần duy nhất trong danh sách.
-  2. **Gộp điểm (Score Fusion):** Nếu một video được trả về nhiều lần từ nhiều nguồn, hệ thống tự động gộp các loại điểm (ví dụ: `clip`, `vlm_rerank`) và giữ lại điểm số cao nhất cho mỗi loại.
-  3. **Xếp hạng (Reranking bằng RRF):** Sử dụng thuật toán **Reciprocal Rank Fusion (RRF)**. Khi gộp nhiều nguồn, điểm số thô thường khác thang đo (scale) nên không thể cộng trực tiếp. RRF quy đổi thứ hạng (`rank`) của mỗi video trong từng nguồn thành điểm số theo công thức `1 / (k + rank)` (với `k=60`). Sau đó cộng dồn điểm RRF từ các nguồn lại để xếp hạng chung, đảm bảo sự cân bằng và ưu tiên các kết quả xuất hiện nhiều lần ở thứ hạng cao.
-  4. **Padding:** Nếu số lượng video độc lập ít hơn `limit`, tự động sinh ra các kết quả đệm (như `L00_V000`, `L00_V001`) với `start_frame=0` để đủ 100 dòng theo yêu cầu nộp bài.
+- **Input**
+  - `runs`: `list[list[Candidate]]` — mỗi phần tử là kết quả *đã xếp hạng* của
+    một retriever.
+  - `limit`: số moment tối đa trả về (mặc định 100).
+  - `weights`: trọng số theo tên nguồn (tuỳ chọn).
+  - `rrf_k`: hằng số RRF (mặc định 60).
+  - `merge_radius`: bán kính gộp moment theo frame (mặc định 0).
+- **Output**: `list[Candidate]` dài **tối đa** `limit` — có thể ngắn hơn.
+
+## Xếp hạng bằng weighted RRF
+
+Điểm thô của các nguồn khác thang đo: CLIP/SigLIP cho cosine trong `[0, 1]`, BM25
+cho điểm không chặn trên. Cộng thẳng thì nguồn có thang đo lớn hơn luôn thắng bất
+kể thứ hạng. RRF chỉ dùng **thứ hạng** nên miễn nhiễm với chuyện đó:
+
+```text
+RRF(candidate) = Σ_source  weight(source) / (rrf_k + rank_source)
+```
+
+`rank_source` là vị trí 1-based trong run của nguồn đó. Trọng số mặc định để
+bằng nhau (`clip = siglip = bm25 = 1.0`) và nằm ở `DEFAULT_WEIGHTS` trong
+`aic/fusion/rank.py`. Chưa tinh chỉnh vì chưa có ground truth để đo — đoán trọng
+số lúc này là tự bịa.
+
+Thứ tự cuối được sắp theo `(-rrf, video_id, anchor_frame)` nên **hoàn toàn tất
+định**, chạy lại cho ra đúng một kết quả.
+
+## Danh tính là moment, không phải video
+
+Khoá gộp là `(video_id, anchor_frame)`, trong đó `anchor_frame` là
+`representative_frames[0]` (một actual video frame 0-based).
+
+Gộp mọi kết quả của cùng một video thành một dòng sẽ:
+
+- giết TRAKE, vì TRAKE cần nhiều mốc sự kiện **trong cùng một video**;
+- vứt mất các cảnh khác nhau của một video dài, trong khi mỗi cảnh là một ứng
+  viên độc lập.
+
+`merge_radius=0` nghĩa là chỉ gộp khi **trùng đúng frame** — tức khi hai nguồn
+cùng trỏ về đúng một keyframe. Đây là mức an toàn: không nới rộng bằng heuristic
+chưa được đo. Nới ra thì hai moment cách nhau `<= merge_radius` frame sẽ nhập
+làm một.
+
+Khi gộp: điểm lấy `max` theo từng khoá nguồn, evidence hợp nhất, `start_frame` /
+`end_frame` mở rộng thành bao lồi, nhưng `representative_frames` vẫn giữ **đúng
+một** anchor — vì `to_answer()` dùng list đó làm frame nộp bài khi operator chưa
+chọn tay, nhiều phần tử sẽ đẻ ra dòng KIS/Q&A sai định dạng.
+
+`fuse` **không sửa** các `Candidate` đầu vào; nó dựng object mới.
+
+## Không độn candidate giả
+
+Bản trước độn `L00_V000`, `L00_V001`… cho đủ `limit`. Đã bỏ hẳn. Dòng độn không
+bao giờ ghi điểm mà lại có nguy cơ đi thẳng vào `submission.zip`. Ít kết quả thật
+thì trả ít, đúng bằng số thật.
 
 ## Chạy thế nào
-
-Ví dụ cách gọi hàm `fuse` trong mã nguồn thực tế:
 
 ```python
 from aic.core.types import Candidate
 from aic.fusion.rank import fuse
 
-# Kết quả giả định từ CLIP retriever
 run_clip = [
-    Candidate(video_id="L01_V010", start_frame=100, end_frame=150, scores={"clip": 0.8}),
-    Candidate(video_id="L02_V020", start_frame=200, end_frame=250, scores={"clip": 0.9}),
+    Candidate(video_id="L21_V001", start_frame=100, end_frame=100,
+              representative_frames=[100], scores={"clip": 0.31}),
+    Candidate(video_id="L21_V001", start_frame=5000, end_frame=5000,
+              representative_frames=[5000], scores={"clip": 0.29}),
+]
+run_bm25 = [
+    Candidate(video_id="L21_V001", start_frame=100, end_frame=100,
+              representative_frames=[100], scores={"bm25": 12.5}),
 ]
 
-# Kết quả giả định từ VLM reranker
-run_vlm = [
-    Candidate(video_id="L01_V010", start_frame=110, end_frame=160, scores={"vlm": 0.95}),
-]
-
-# Fuse kết quả và giới hạn 100 kết quả
-fused_results = fuse([run_clip, run_vlm], limit=100)
-
-for cand in fused_results:
-    print(f"Video: {cand.video_id}, Điểm RRF: {cand.scores.get('fused')}")
+fused = fuse([run_clip, run_bm25], limit=100, weights={"clip": 1.0, "bm25": 1.0})
+for c in fused:
+    print(c.video_id, c.start_frame, c.scores["fused"])
 ```
 
-## Chưa làm / Blockers
+Hai moment `100` và `5000` của cùng `L21_V001` vẫn tồn tại song song; moment
+`100` được cả hai nguồn trả nên xếp trên.
 
-- Đối với truy vấn loại TRAKE (yêu cầu nhiều frame cho nhiều khoảnh khắc trong cùng một video), logic "giữ 1 frame đại diện duy nhất cho mỗi video" có thể sẽ cần điều chỉnh lại ở giai đoạn sau. Hiện tại hệ thống đang ưu tiên phục vụ truy vấn KIS.
+## Chưa làm
 
+- Trọng số theo loại query (KIS / Q&A / TRAKE) chưa có.
+- `merge_radius` theo thời gian thực (giây × fps) thay vì theo frame cố định.
+- Chưa có rerank bằng VLM.
