@@ -125,13 +125,15 @@ function renderManifestList() {
 function selectManifestQuery(queryId) {
   const item = state.manifest.find((entry) => entry.query_id === queryId);
   if (!item) return;
-  state.currentQueryId = item.query_id;
-  $('query-id-input').value = item.query_id;
-  $('export-query-id').value = item.query_id;
-  $('query-input').value = item.text;
-  $('n-events-input').value = item.task === 'trake' && item.n_events ? item.n_events : 1;
-  $('trake-events-confirmed').checked = Boolean(item.events_confirmed);
-  selectTask(item.task);
+  const form = submissionHelpers.manifestQueryFormState(item);
+  state.currentQueryId = form.queryId;
+  $('query-id-input').value = form.queryId;
+  $('export-query-id').value = form.queryId;
+  $('query-input').value = form.text;
+  $('translated-text').value = form.translatedText;
+  $('n-events-input').value = form.nEvents;
+  $('trake-events-confirmed').checked = form.eventsConfirmed;
+  selectTask(form.task);
   renderManifestList();
   renderSelectionsList();
 }
@@ -145,12 +147,10 @@ function updateSelectedTrakeState(confirmEvents) {
     toast('Số events TRAKE phải lớn hơn 0', 'warning');
     return;
   }
-  state.manifest = submissionHelpers.updateTrakeState(
-    state.manifest,
-    item.query_id,
-    nEvents,
-    Boolean(confirmEvents),
-  );
+  state.manifest = confirmEvents
+    ? submissionHelpers.updateTrakeState(state.manifest, item.query_id, nEvents, true)
+    : submissionHelpers.changeTrakeEventCount(state.manifest, item.query_id, nEvents);
+  $('trake-events-confirmed').checked = Boolean(confirmEvents);
   saveManifest();
   renderManifestList();
 }
@@ -1000,14 +1000,18 @@ function showExportReview(queryId) {
     body.innerHTML = `<div style="display:flex; flex-direction:column; gap:8px;">${html}</div>`;
   }
   else if (q.task === 'trake') {
+    const manifestItem = state.manifest.find((item) => item.query_id === queryId);
+    const nEvents = manifestItem ? manifestItem.n_events : null;
     const html = querySelections.map((s, idx) => {
-      const eventsHtml = s.frames.map((frame, eIdx) => `
+      const eventsHtml = submissionHelpers.buildTrakeReviewSlots(s.frames, nEvents).map((slot) => `
         <div style="flex:1; min-width:110px; display:flex; flex-direction:column; gap:4px; background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:var(--radius-md); padding:6px; align-items:center;">
-          <div style="font-size:10px; font-weight:600; color:var(--text-muted);">Sự kiện ${eIdx + 1}</div>
+          <div style="font-size:10px; font-weight:600; color:var(--text-muted);">Sự kiện ${slot.event}</div>
           <div style="width:100%; aspect-ratio:16/9; border-radius:var(--radius-sm); overflow:hidden; background:#000;">
-            <img src="${keyframeUrl(s.video_id, frame)}" style="width:100%; height:100%; object-fit:cover;" />
+            ${slot.missing
+              ? '<div style="height:100%;display:flex;align-items:center;justify-content:center;color:var(--amber);font-size:10px;">Thiếu frame</div>'
+              : `<img src="${keyframeUrl(s.video_id, slot.frame)}" style="width:100%; height:100%; object-fit:cover;" />`}
           </div>
-          <div style="font-family:'JetBrains Mono',monospace; font-size:10px; color:var(--cyan); font-weight:600;">f${frame}</div>
+          <div style="font-family:'JetBrains Mono',monospace; font-size:10px; color:${slot.missing ? 'var(--amber)' : 'var(--cyan)'}; font-weight:600;">${slot.missing ? 'Thiếu frame' : `f${slot.frame}`}</div>
         </div>
       `).join('');
       
@@ -1139,7 +1143,10 @@ async function doExport() {
       toast('Validation export thất bại', 'error');
       return;
     }
-    if (res.headers.get('X-Validation-Status') !== 'PASS') {
+    if (!submissionHelpers.canDownloadValidatedZip(
+      res.headers.get('X-Validation-Status'),
+      res.headers.get('Content-Type'),
+    )) {
       setValidationReport({ errors: [{ message: 'Export không trả về trạng thái PASS' }], warnings: [] });
       toast('Export không đạt PASS', 'error');
       return;

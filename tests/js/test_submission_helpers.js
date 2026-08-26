@@ -49,6 +49,48 @@ test('updates only the selected TRAKE query event state', () => {
   assert.equal(result[1].events_confirmed, true);
 });
 
+test('resets only the edited TRAKE query confirmation when its count changes', () => {
+  const manifest = [
+    { query_id: 'query-p1-1-trake', task: 'trake', text: 'first', source_name: 'first-trake.txt', n_events: 2, events_confirmed: true },
+    { query_id: 'query-p1-2-trake', task: 'trake', text: 'second', source_name: 'second-trake.txt', n_events: 4, events_confirmed: true },
+  ];
+  const result = helpers.changeTrakeEventCount(manifest, 'query-p1-2-trake', 5);
+
+  assert.equal(result[0].n_events, 2);
+  assert.equal(result[0].events_confirmed, true);
+  assert.equal(result[1].n_events, 5);
+  assert.equal(result[1].events_confirmed, false);
+});
+
+test('allows download only for an exact PASS ZIP response', () => {
+  assert.equal(helpers.canDownloadValidatedZip('PASS', 'application/zip'), true);
+  assert.equal(helpers.canDownloadValidatedZip('PASS', 'application/zip; charset=binary'), true);
+  assert.equal(helpers.canDownloadValidatedZip('PASS', 'text/html'), false);
+  assert.equal(helpers.canDownloadValidatedZip('pass', 'application/zip'), false);
+});
+
+test('builds TRAKE review slots from the manifest event count', () => {
+  assert.deepEqual(helpers.buildTrakeReviewSlots([120, 240], 4), [
+    { event: 1, frame: 120, missing: false },
+    { event: 2, frame: 240, missing: false },
+    { event: 3, frame: null, missing: true },
+    { event: 4, frame: null, missing: true },
+  ]);
+});
+
+test('selecting a manifest query clears stale translated text', () => {
+  assert.deepEqual(helpers.manifestQueryFormState({
+    query_id: 'query-p1-3-qa', task: 'qa', text: 'Câu hỏi mới', n_events: null, events_confirmed: true,
+  }), {
+    queryId: 'query-p1-3-qa',
+    task: 'qa',
+    text: 'Câu hỏi mới',
+    nEvents: 1,
+    eventsConfirmed: true,
+    translatedText: '',
+  });
+});
+
 test('groups backend validation issues by query', () => {
   const groups = helpers.groupValidationIssues([
     { query_id: 'query-p1-1-kis', message: 'Frame must be an integer' },

@@ -33,6 +33,36 @@
     });
   }
 
+  function changeTrakeEventCount(manifest, queryId, nEvents) {
+    return updateTrakeState(manifest, queryId, nEvents, false);
+  }
+
+  function canDownloadValidatedZip(validationStatus, contentType) {
+    const mediaType = String(contentType || '').split(';', 1)[0].trim().toLowerCase();
+    return validationStatus === 'PASS' && mediaType === 'application/zip';
+  }
+
+  function buildTrakeReviewSlots(frames, nEvents) {
+    const values = Array.isArray(frames) ? frames : [];
+    const count = Number.isInteger(nEvents) && nEvents > 0 ? nEvents : values.length;
+    return Array.from({ length: count }, (_, index) => ({
+      event: index + 1,
+      frame: values[index] ?? null,
+      missing: values[index] === undefined || values[index] === null,
+    }));
+  }
+
+  function manifestQueryFormState(item) {
+    return {
+      queryId: item.query_id,
+      task: item.task,
+      text: item.text,
+      nEvents: item.task === 'trake' && item.n_events ? item.n_events : 1,
+      eventsConfirmed: Boolean(item.events_confirmed),
+      translatedText: '',
+    };
+  }
+
   function groupValidationIssues(issues) {
     return (Array.isArray(issues) ? issues : []).reduce((groups, issue) => {
       const entry = typeof issue === 'string' ? { message: issue } : (issue || {});
@@ -50,6 +80,10 @@
     inferTaskFromFilename,
     upsertManifestItem,
     updateTrakeState,
+    changeTrakeEventCount,
+    canDownloadValidatedZip,
+    buildTrakeReviewSlots,
+    manifestQueryFormState,
     groupValidationIssues,
   };
 });
