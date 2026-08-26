@@ -78,6 +78,8 @@
       candidates: [],
       selected: null,
       currentFps: null,
+      candidateDraftFrames: {},
+      currentPlaybackFrame: null,
       iterCandidates: [],
       iterCursor: 0,
       iterRound: 0,

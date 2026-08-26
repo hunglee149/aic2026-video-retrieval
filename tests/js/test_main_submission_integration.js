@@ -344,6 +344,79 @@ test('switching manifest queries clears stale candidate drafts but preserves sav
   assert.equal(document.getElementById('results-count').textContent, '0 candidates');
 });
 
+test('candidates in the same video keep independent draft frames', () => {
+  const { context, document } = createMainHarness();
+  setState(context, 'currentQueryId', 'query-p1-1-kis');
+  setState(context, 'task', 'kis');
+  setState(context, 'currentFps', 60);
+  setState(context, 'selections', [{
+    queryId: 'query-p1-1-kis', task: 'kis', video_id: 'L01_V001',
+    frames: [999], answer: '',
+  }]);
+  setState(context, 'candidates', [
+    { video_id: 'L01_V001', representative_frames: [9], start_frame: 9, rank: 1, scores: {} },
+    { video_id: 'L01_V001', representative_frames: [19], start_frame: 19, rank: 2, scores: {} },
+  ]);
+
+  vm.runInContext('selectCandidate(1)', context);
+
+  assert.equal(document.getElementById('frame-input').value, 20);
+  assert.equal(vm.runInContext('state.currentFps', context), null);
+});
+
+test('video playback reports its current frame without overwriting the answer draft', () => {
+  const { context, document } = createMainHarness();
+  document.listeners.DOMContentLoaded[0]();
+  setState(context, 'task', 'kis');
+  setState(context, 'currentFps', 25);
+  const video = document.getElementById('preview-vid');
+  video.style.display = 'block';
+  video.currentTime = 4;
+  document.getElementById('frame-input').value = '777';
+
+  video.dispatchEvent({ type: 'timeupdate' });
+
+  assert.equal(document.getElementById('frame-input').value, '777');
+  assert.equal(document.getElementById('video-current-frame').textContent, '101');
+});
+
+test('taking the current video frame updates only the selected candidate draft', () => {
+  const { context, document } = createMainHarness();
+  setState(context, 'task', 'kis');
+  setState(context, 'currentFps', 25);
+  setState(context, 'selected', 1);
+  setState(context, 'candidates', [
+    { video_id: 'L01_V001', representative_frames: [9], start_frame: 9, rank: 1 },
+    { video_id: 'L01_V001', representative_frames: [19], start_frame: 19, rank: 2 },
+  ]);
+  const video = document.getElementById('preview-vid');
+  video.style.display = 'block';
+  video.currentTime = 4;
+  document.getElementById('frame-input').value = '777';
+
+  assert.equal(vm.runInContext('typeof grabCurrentFrame', context), 'function');
+  vm.runInContext('grabCurrentFrame()', context);
+
+  assert.equal(document.getElementById('frame-input').value, 101);
+  assert.deepEqual(stateJson(context, 'state.candidateDraftFrames'), {
+    L01_V001__19: 101,
+  });
+});
+
+test('selecting a candidate loads the inline mini video without locking the page', () => {
+  const { context, document } = createMainHarness();
+  setState(context, 'task', 'kis');
+  setState(context, 'candidates', [{
+    video_id: 'L01_V001', representative_frames: [9], start_frame: 9, rank: 1, scores: {},
+  }]);
+
+  vm.runInContext('selectCandidate(0)', context);
+
+  assert.equal(document.body.classList.contains('modal-open'), false);
+  assert.equal(document.getElementById('preview-vid').src, '/api/video/L01_V001');
+  assert.equal(document.getElementById('detail-rank-badge').textContent, '#1');
+});
+
 test('validation report renders stable code and query-row location', () => {
   const { context, document } = createMainHarness();
   context.__report = {

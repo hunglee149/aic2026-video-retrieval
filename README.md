@@ -70,6 +70,24 @@ Chạy UI
 python -m uvicorn aic.ui.app:app --reload --port 8000
 ```
 
+### Dịch query tiếng Việt bằng model local
+
+Mặc định UI dùng `Helsinki-NLP/opus-mt-vi-en` để dịch query sang tiếng Anh
+cho CLIP. Không cần `GEMINI_API_KEY`. Lần dịch đầu tiên Hugging Face sẽ tải
+model về cache của máy; các lần chạy sau dùng lại cache đó.
+
+Thiết bị được chọn tự động: CUDA nếu PyTorch nhận GPU, ngược lại dùng CPU.
+Có thể ép thiết bị khi chạy:
+
+```bash
+AIC_TRANSLATION_DEVICE=cuda python -m uvicorn aic.ui.app:app --reload --port 8000
+```
+
+Các biến cấu hình tùy chọn:
+
+- `AIC_TRANSLATION_DEVICE=auto|cuda|cpu`
+- `AIC_TRANSLATION_MODEL=Helsinki-NLP/opus-mt-vi-en`
+
 ## Xuất submission đã kiểm tra
 
 Dùng **query pack đầy đủ** BTC cung cấp: nạp file ZIP, hoặc nạp toàn bộ các

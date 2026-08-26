@@ -117,6 +117,8 @@ test('clears query-local candidate state without discarding saved selections', (
     selections,
     manifest,
     currentFps: 25,
+    candidateDraftFrames: { stale: 999 },
+    currentPlaybackFrame: 999,
     iterCandidates: [{ video_id: 'L01_V001' }],
     iterCursor: 3,
     iterRound: 2,
@@ -132,6 +134,8 @@ test('clears query-local candidate state without discarding saved selections', (
   assert.deepEqual(next?.candidates, []);
   assert.equal(next?.selected, null);
   assert.equal(next?.currentFps, null);
+  assert.deepEqual(next?.candidateDraftFrames, {});
+  assert.equal(next?.currentPlaybackFrame, null);
   assert.deepEqual(next?.iterCandidates, []);
   assert.equal(next?.iterRunning, false);
   assert.deepEqual(next?.iterVerdict, {});

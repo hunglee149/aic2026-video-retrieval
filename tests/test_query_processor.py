@@ -78,6 +78,20 @@ class TestTranslateQuery:
         result = translate_query(q, translate_fn=lambda x: "hello")
         assert result.text_en == "hello"
 
+    def test_default_uses_local_translator(self, monkeypatch):
+        import aic.core.query_processor as processor
+
+        monkeypatch.setattr(
+            processor,
+            "_local_translate",
+            lambda text: "a woman wearing a red shirt",
+            raising=False,
+        )
+        q = make_query("q1", "một người phụ nữ mặc áo đỏ")
+        result = processor.translate_query(q)
+
+        assert result.text_en == "a woman wearing a red shirt"
+
     def test_fallback_on_error(self):
         q = make_query("q1", "tiếng Việt")
 
@@ -89,6 +103,22 @@ class TestTranslateQuery:
 
 
 class TestProcessQuery:
+    def test_default_processing_uses_local_translation_and_rules(self, monkeypatch):
+        import aic.core.query_processor as processor
+
+        monkeypatch.setattr(
+            processor,
+            "_local_translate",
+            lambda text: "a person driving a car",
+            raising=False,
+        )
+        q = make_query("q_car", "người lái xe ô tô")
+        result = processor.process_query(q)
+
+        assert result.text_en == "a person driving a car"
+        assert "Person" in result.objects
+        assert "Car" in result.objects
+
     def test_custom_llm_fn(self):
         from aic.core.query_processor import process_query
 

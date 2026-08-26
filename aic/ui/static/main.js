@@ -18,6 +18,8 @@ const state = {
   currentQueryId: null,
   validationReport: null,
   gridMode: true,
+  candidateDraftFrames: {},
+  currentPlaybackFrame: null,
 
   iterCandidates: [],
   iterCursor: 0,
@@ -78,6 +80,39 @@ function keyframeUrl(videoId, frameIdx) {
 
 function candidateKey(c) {
   return `${c.video_id}__${c.representative_frames[0] ?? c.start_frame}`;
+}
+
+function currentVideoFrame() {
+  const video = $('preview-vid');
+  if (!video || video.style.display === 'none') return null;
+  const fps = state.currentFps || 25;
+  return Math.round(video.currentTime * fps) + 1;
+}
+
+function updatePlaybackFrame() {
+  const frame = currentVideoFrame();
+  if (!Number.isInteger(frame)) return;
+  state.currentPlaybackFrame = frame;
+  const indicator = $('video-current-frame');
+  if (indicator) indicator.textContent = String(frame);
+}
+
+function grabCurrentFrame(e) {
+  if (e) e.preventDefault();
+  if (state.selected === null) return;
+  const candidate = state.candidates[state.selected];
+  if (!candidate) return;
+  const frame = currentVideoFrame()
+    ?? state.currentPlaybackFrame
+    ?? submissionHelpers.candidateToSubmissionFrame(candidate);
+  if (!Number.isInteger(frame)) return;
+  $('frame-input').value = frame;
+  state.candidateDraftFrames[candidateKey(candidate)] = frame;
+  const button = $('btn-grab-frame');
+  if (button) {
+    button.classList.add('captured');
+    setTimeout(() => button.classList.remove('captured'), 700);
+  }
 }
 
 function currentManifestItem() {
@@ -151,6 +186,8 @@ function clearQueryWorkspace() {
   if (evidenceSection) evidenceSection.style.display = 'none';
   const frameInput = $('frame-input');
   if (frameInput) frameInput.value = '';
+  const playbackFrame = $('video-current-frame');
+  if (playbackFrame) playbackFrame.textContent = '—';
   const answerInput = $('answer-input');
   if (answerInput) answerInput.value = '';
   const trakeContainer = $('frame-picker-trake-container');
@@ -506,7 +543,6 @@ function selectCandidate(idx) {
     $('btn-confirm-selection').disabled = true;
     return;
   }
-
   document.querySelectorAll('.candidate-card').forEach((el, i) => {
     el.classList.toggle('selected', i === idx);
   });
@@ -515,19 +551,21 @@ function selectCandidate(idx) {
   const img = $('preview-img');
   const vid = $('preview-vid');
   const placeholder = $('preview-placeholder');
+  state.currentFps = null;
   
   img.style.display = 'none';
   if (vid) vid.style.display = 'none';
   placeholder.style.display = 'flex';
   
   const queryId = currentQueryId();
-  let initialFrame = frameIdx;
-  
-  // Load initial frame from confirmed selection if exists
+  const draftFrame = state.candidateDraftFrames[candidateKey(c)];
+  const initialFrame = Number.isInteger(draftFrame) ? draftFrame : frameIdx;
+  state.currentPlaybackFrame = initialFrame;
+  const playbackFrame = $('video-current-frame');
+  if (playbackFrame) playbackFrame.textContent = String(initialFrame);
+
+  // Confirmed rows remain independent from the candidate's editable draft.
   const existing = state.selections.find(s => s.queryId === queryId && s.video_id === c.video_id);
-  if (existing && existing.frames && existing.frames[0]) {
-    initialFrame = existing.frames[0];
-  }
   
   if (vid) {
     // Hiển thị Video, fallback sang keyframe nếu video lỗi
@@ -563,6 +601,8 @@ function selectCandidate(idx) {
   }
 
   $('detail-rank-badge').textContent = `#${c.rank}`;
+  const videoId = $('detail-video-id');
+  if (videoId) videoId.textContent = c.video_id;
 
   const scoresSection = $('detail-scores-section');
   const scoresBody = $('detail-scores-body');
@@ -619,7 +659,7 @@ function selectCandidate(idx) {
   } else {
     $('frame-picker-single-row').style.display = 'flex';
     $('frame-picker-trake-container').style.display = 'none';
-    $('frame-input').value = existing ? existing.frames[0] : frameIdx;
+    $('frame-input').value = initialFrame;
   }
 
   if (state.task === 'qa') {
@@ -1392,36 +1432,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const vid = $('preview-vid');
   if (vid) {
-    vid.addEventListener('timeupdate', () => {
-      if (vid.style.display !== 'none' && document.activeElement !== $('frame-input')) {
-        const fps = state.currentFps || 25;
-        const currentFrame = Math.round(vid.currentTime * fps) + 1;
-        if (state.task !== 'trake') {
-          $('frame-input').value = currentFrame;
-        }
-      }
-    });
-    vid.addEventListener('seeked', () => {
-      if (vid.style.display !== 'none' && document.activeElement !== $('frame-input')) {
-        const fps = state.currentFps || 25;
-        const currentFrame = Math.round(vid.currentTime * fps) + 1;
-        if (state.task !== 'trake') {
-          $('frame-input').value = currentFrame;
-        }
-      }
-    });
+    vid.addEventListener('timeupdate', updatePlaybackFrame);
+    vid.addEventListener('seeked', updatePlaybackFrame);
   }
 
   const frameInput = $('frame-input');
   if (frameInput) {
     frameInput.addEventListener('input', (e) => {
       const frame = parseInt(e.target.value, 10);
+      if (!isNaN(frame) && state.selected !== null) {
+        const candidate = state.candidates[state.selected];
+        if (candidate) state.candidateDraftFrames[candidateKey(candidate)] = frame;
+      }
       if (!isNaN(frame) && vid && vid.style.display !== 'none') {
         const fps = state.currentFps || 25;
         vid.currentTime = Math.max(0, frame - 1) / fps;
       }
     });
   }
+
 });
 
 // Nạp query pack ZIP hoặc một/nhiều query TXT.

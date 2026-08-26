@@ -40,7 +40,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from ..core.convert import to_answer, to_csv_row
-from ..core.query_processor import make_query, translate_query
+from ..core.local_translation import translate_text
+from ..core.query_processor import make_query
 from ..core.types import Candidate
 from ..fusion.rank import fuse
 from ..pipeline import retrieve_and_fuse
@@ -357,15 +358,9 @@ def status():
 
 @app.post("/api/translate")
 def translate(req: TranslateRequest):
-    """Dịch câu hỏi tiếng Việt → tiếng Anh qua Gemini."""
-    import os
-    if not os.environ.get("GEMINI_API_KEY"):
-        return {"text_en": req.text_vi, "ok": False, "error": "Chưa cài đặt biến môi trường GEMINI_API_KEY"}
-        
-    q = make_query("_tmp", text_vi=req.text_vi)
-    from ..core.query_processor import _gemini_translate
+    """Dịch câu hỏi tiếng Việt → tiếng Anh bằng model local."""
     try:
-        text_en = _gemini_translate(req.text_vi)
+        text_en = translate_text(req.text_vi)
         return {"text_en": text_en, "ok": True}
     except Exception as e:
         logger.warning("Translation error: %s", e)
@@ -386,7 +381,7 @@ def search(req: SearchRequest):
         n_events=req.n_events,
     )
     
-    # Bật lại LLM Gemini để kết quả tốt hơn (dịch + synonyms)
+    # Dịch local và trích xuất object theo rule nếu UI chưa cung cấp text_en.
     query = process_query(query)
     
     exclude = frozenset(req.exclude)

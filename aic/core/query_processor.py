@@ -14,6 +14,7 @@ import logging
 import re
 from pathlib import Path
 
+from .local_translation import translate_text as _local_translate
 from .types import Query
 
 logger = logging.getLogger(__name__)
@@ -88,14 +89,14 @@ def parse_query_dir(dirpath: str | Path) -> list[Query]:
 def translate_query(query: Query, translate_fn=None) -> Query:
     """Dịch query.text_vi sang tiếng Anh, ghi vào query.text_en.
 
-    translate_fn: callable nhận str → str. 
-    Nếu None, dùng Gemini API (cần google-genai).
+    translate_fn: callable nhận str → str.
+    Nếu None, dùng model OPUS-MT local.
     """
     if query.text_en:
         return query  # đã có bản dịch
 
     if translate_fn is None:
-        translate_fn = _gemini_translate
+        translate_fn = _local_translate
 
     try:
         query.text_en = translate_fn(query.text_vi)
@@ -108,15 +109,17 @@ def translate_query(query: Query, translate_fn=None) -> Query:
 
 
 def process_query(query: Query, llm_fn=None) -> Query:
-    """Xử lý toàn diện Query: Dịch + Mở rộng từ đồng nghĩa + Trích xuất Object.
+    """Dịch local và trích xuất object; ``llm_fn`` có thể thêm từ đồng nghĩa.
 
     Điền đầy đủ:
     - query.text_en: Dịch chuẩn cho CLIP/SigLIP
-    - query.expanded_vi / query.expanded_en: Từ đồng nghĩa cho BM25
+    - query.expanded_vi / query.expanded_en: Từ đồng nghĩa khi ``llm_fn`` cung cấp
     - query.objects: Danh sách Object detection entities cho ObjectFilter
     """
     if llm_fn is None:
-        llm_fn = _gemini_process_query
+        translate_query(query)
+        _rule_based_extract(query)
+        return query
 
     try:
         res = llm_fn(query.text_vi)
@@ -139,7 +142,7 @@ def process_query(query: Query, llm_fn=None) -> Query:
 
 
 def _rule_based_extract(query: Query) -> None:
-    """Fallback rule-based extraction of objects and synonyms when offline."""
+    """Extract known OpenImages object entities with offline rules."""
     text_lower = f"{query.text_vi} {query.text_en}".lower()
     
     # Common object keywords mapping to OpenImages entities
@@ -166,56 +169,6 @@ def _rule_based_extract(query: Query) -> None:
         if kw in text_lower:
             found_objects.add(entity)
     query.objects = sorted(found_objects)
-
-
-def _gemini_process_query(text_vi: str) -> dict:
-    """Dùng Gemini phân tích trích xuất bản dịch, từ đồng nghĩa và objects."""
-    import json
-    import os
-    from google import genai
-
-    client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-    prompt = (
-        "Analyze this Vietnamese video search query and output a JSON object:\n"
-        f"Query: \"{text_vi}\"\n\n"
-        "Return ONLY a valid JSON with these keys:\n"
-        "- text_en: Precise English translation for visual CLIP retrieval\n"
-        "- expanded_vi: List of 3-5 Vietnamese synonyms or related keywords\n"
-        "- expanded_en: List of 3-5 English synonyms or related keywords\n"
-        "- objects: List of detected objects from (Person, Car, Motorcycle, Bicycle, Bus, Truck, "
-        "Dog, Cat, Tree, Building, House, Food, Table, Chair, Telephone, Computer, Television, Clothing, Fish, Boat)\n\n"
-        "JSON format:"
-    )
-    
-    response = client.models.generate_content(
-        model="gemini-3.6-flash",
-        contents=prompt,
-    )
-    txt = response.text.strip()
-    # Clean possible markdown block
-    if txt.startswith("```"):
-        txt = re.sub(r"^```[a-zA-Z]*\n", "", txt)
-        txt = re.sub(r"\n```$", "", txt)
-    return json.loads(txt)
-
-
-def _gemini_translate(text_vi: str) -> str:
-    """Dịch tiếng Việt → tiếng Anh bằng Gemini API."""
-    import os
-    from google import genai
-
-    client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-    response = client.models.generate_content(
-        model="gemini-3.6-flash",
-        contents=(
-            "Translate the following Vietnamese text to English. "
-            "Keep all details including colors, numbers, negations, "
-            "temporal relationships, and proper nouns. "
-            "Output ONLY the English translation, nothing else.\n\n"
-            f"{text_vi}"
-        ),
-    )
-    return response.text.strip()
 
 
 def make_query(
