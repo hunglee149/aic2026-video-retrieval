@@ -9,6 +9,15 @@
     return String(answer ?? '');
   }
 
+  function unicodeCodePointLength(value) {
+    return Array.from(String(value ?? '')).length;
+  }
+
+  function candidateToSubmissionFrame(candidate) {
+    const frame = candidate?.representative_frames?.[0] ?? candidate?.start_frame;
+    return Number.isInteger(frame) ? frame + 1 : null;
+  }
+
   function canUseIterative(task) {
     return task === 'kis';
   }
@@ -63,19 +72,75 @@
     };
   }
 
+  function clearQueryWorkspaceState(current) {
+    return {
+      ...current,
+      candidates: [],
+      selected: null,
+      currentFps: null,
+      iterCandidates: [],
+      iterCursor: 0,
+      iterRound: 0,
+      iterRunning: false,
+      iterVerdict: {},
+      iterMatchedList: [],
+      iterUnsureList: [],
+      iterExcluded: new Set(),
+    };
+  }
+
+  function canInstallManifest(httpOk, report) {
+    return Boolean(httpOk && report?.ok && Array.isArray(report.manifest));
+  }
+
+  function manifestQueryReadiness(item, selections) {
+    const rows = (Array.isArray(selections) ? selections : [])
+      .filter((selection) => selection.queryId === item.query_id);
+    const codes = [];
+    const labels = [];
+    if (!rows.length) {
+      codes.push('missing_rows');
+      labels.push('Chưa có dòng');
+    }
+    if (item.task === 'trake' && !item.events_confirmed) {
+      codes.push('trake_events_unconfirmed');
+      labels.push('Chưa xác nhận events');
+    }
+    return {
+      ready: codes.length === 0,
+      codes,
+      label: labels.length ? labels.join(' · ') : 'Ready',
+    };
+  }
+
   function groupValidationIssues(issues) {
     return (Array.isArray(issues) ? issues : []).reduce((groups, issue) => {
       const entry = typeof issue === 'string' ? { message: issue } : (issue || {});
       const queryId = entry.query_id || entry.queryId || 'general';
       const message = entry.message || entry.detail || String(issue);
       if (!groups[queryId]) groups[queryId] = [];
-      groups[queryId].push(message);
+      groups[queryId].push({ ...entry, message });
       return groups;
     }, {});
   }
 
+  function formatValidationIssue(issue) {
+    const entry = typeof issue === 'string' ? { message: issue } : (issue || {});
+    const parts = [];
+    if (entry.code) parts.push(`[${entry.code}]`);
+    const location = [];
+    const queryId = entry.query_id || entry.queryId;
+    if (queryId) location.push(`query ${queryId}`);
+    if (Number.isInteger(entry.row)) location.push(`row ${entry.row}`);
+    if (location.length) parts.push(location.join(' · '));
+    parts.push(entry.message || entry.detail || String(issue));
+    return parts.join(' — ');
+  }
+
   return {
     prepareQaAnswer,
+    unicodeCodePointLength,
+    candidateToSubmissionFrame,
     canUseIterative,
     inferTaskFromFilename,
     upsertManifestItem,
@@ -84,6 +149,10 @@
     canDownloadValidatedZip,
     buildTrakeReviewSlots,
     manifestQueryFormState,
+    clearQueryWorkspaceState,
+    canInstallManifest,
+    manifestQueryReadiness,
     groupValidationIssues,
+    formatValidationIssue,
   };
 });

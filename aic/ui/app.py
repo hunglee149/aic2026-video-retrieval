@@ -33,6 +33,8 @@ if env_path.exists():
             os.environ[_k.strip()] = _v.strip().strip("'\"")
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -70,6 +72,41 @@ USE_DUMMY = os.environ.get("AIC_USE_DUMMY", "0") == "1"
 # ---------------------------------------------------------------------------
 
 app = FastAPI(title="AIC 2026 Video Retrieval", version="0.1.0")
+
+_SUBMISSION_REPORT_PATHS = {"/api/export", "/api/query-pack/texts"}
+
+
+@app.exception_handler(RequestValidationError)
+async def submission_request_validation_handler(
+    request: Request, error: RequestValidationError
+):
+    """Use the submission report contract only on submission-facing APIs."""
+    if request.url.path not in _SUBMISSION_REPORT_PATHS:
+        return await request_validation_exception_handler(request, error)
+
+    report = ValidationReport()
+    seen_fields = set()
+    for item in error.errors():
+        field = ".".join(
+            str(part) for part in item.get("loc", ()) if part != "body"
+        ) or "body"
+        if field in seen_fields:
+            continue
+        seen_fields.add(field)
+        report.errors.append(
+            ValidationIssue(
+                "invalid_request_schema",
+                f"Request field {field!r} is invalid or missing",
+            )
+        )
+    if not report.errors:
+        report.errors.append(
+            ValidationIssue(
+                "invalid_request_schema",
+                "Request body does not match the required schema",
+            )
+        )
+    return JSONResponse(status_code=422, content={"detail": report.to_dict()})
 
 STATIC_DIR = Path(__file__).parent / "static"
 

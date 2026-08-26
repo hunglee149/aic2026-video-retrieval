@@ -69,6 +69,13 @@ def validate_submission(
 ) -> ValidationReport:
     """Validate all rows against the tasks and event counts in a manifest."""
     report = ValidationReport()
+    if not manifest:
+        report.errors.append(
+            ValidationIssue(
+                "empty_manifest",
+                "Submission manifest must contain at least one query",
+            )
+        )
     queries = {query.query_id: query for query in manifest}
     rows_by_query: dict[str, list[tuple[int, Mapping[str, object]]]] = {
         query.query_id: [] for query in manifest

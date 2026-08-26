@@ -83,6 +83,25 @@ def test_write_validated_submission_rejects_kis_with_an_answer(tmp_path):
     ]
 
 
+def test_write_validated_submission_reports_an_empty_manifest_before_writing(tmp_path):
+    with pytest.raises(SubmissionValidationError) as error:
+        writer.write_validated_submission([], [], tmp_path / "submission.zip")
+
+    assert error.value.report.to_dict() == {
+        "ok": False,
+        "errors": [
+            {
+                "code": "empty_manifest",
+                "message": "Submission manifest must contain at least one query",
+                "query_id": None,
+                "row": None,
+            }
+        ],
+        "warnings": [],
+    }
+    assert not (tmp_path / "submission.zip").exists()
+
+
 def test_write_validated_submission_reparses_a_valid_mixed_task_zip(tmp_path):
     out_path = tmp_path / "submission.zip"
     rows = [

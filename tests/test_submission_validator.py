@@ -90,6 +90,23 @@ def test_requires_rows_for_every_manifest_query():
     assert "missing_query_rows" in _codes(report)
 
 
+def test_rejects_an_empty_manifest_with_a_stable_issue():
+    report = validate_submission([], [])
+
+    assert report.to_dict() == {
+        "ok": False,
+        "errors": [
+            {
+                "code": "empty_manifest",
+                "message": "Submission manifest must contain at least one query",
+                "query_id": None,
+                "row": None,
+            }
+        ],
+        "warnings": [],
+    }
+
+
 def test_rejects_rows_for_an_unknown_query():
     report = validate_submission(MANIFEST, _valid_rows() + [_row("query-p1-99-kis")])
 

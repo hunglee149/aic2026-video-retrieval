@@ -221,6 +221,10 @@ textarea::placeholder, input::placeholder { color: var(--text-muted); }
 }
 .query-manifest-item:hover, .query-manifest-item.active { border-color: var(--purple); color: var(--text-primary); }
 .query-manifest-item .manifest-task { float: right; color: var(--cyan); font-family: 'Inter', sans-serif; font-weight: 600; }
+.query-manifest-item .manifest-query-id { overflow-wrap: anywhere; }
+.query-manifest-item .manifest-readiness { display: block; margin-top: 3px; font-family: 'Inter', sans-serif; font-size: 10px; }
+.query-manifest-item .manifest-readiness.ready { color: var(--green); }
+.query-manifest-item .manifest-readiness.not-ready { color: var(--amber); }
 .trake-confirmation { display: flex; gap: 7px; align-items: center; font-size: 12px; color: var(--text-secondary); cursor: pointer; }
 .trake-confirmation input { width: auto; accent-color: var(--purple); }
 

@@ -287,6 +287,63 @@ def test_invalid_export_returns_422_with_stable_validation_codes(client):
     assert detail["warnings"] == []
 
 
+def test_empty_export_manifest_returns_the_shared_stable_422_report(client):
+    response = client.post("/api/export", json={"manifest": [], "rows": []})
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "ok": False,
+        "errors": [
+            {
+                "code": "empty_manifest",
+                "message": "Submission manifest must contain at least one query",
+                "query_id": None,
+                "row": None,
+            }
+        ],
+        "warnings": [],
+    }
+
+
+@pytest.mark.parametrize(
+    ("path", "body", "field"),
+    [
+        ("/api/export", {"manifest": []}, "rows"),
+        (
+            "/api/query-pack/texts",
+            {"files": [{"filename": "query-p1-1-kis.txt"}]},
+            "files.0.content",
+        ),
+    ],
+)
+def test_submission_request_schema_failures_use_the_shared_422_report(
+    client, path, body, field
+):
+    response = client.post(path, json=body)
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "ok": False,
+        "errors": [
+            {
+                "code": "invalid_request_schema",
+                "message": f"Request field {field!r} is invalid or missing",
+                "query_id": None,
+                "row": None,
+            }
+        ],
+        "warnings": [],
+    }
+
+
+def test_non_submission_request_schema_failure_keeps_fastapi_default_shape(client):
+    response = client.post("/api/translate", json={})
+
+    assert response.status_code == 422
+    assert isinstance(response.json()["detail"], list)
+    assert response.json()["detail"][0]["loc"] == ["body", "text_vi"]
+
+
 def test_export_rejects_all_manifest_invariant_bypasses_in_one_stable_report(client):
     manifest = [
         {

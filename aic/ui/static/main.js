@@ -108,15 +108,89 @@ function loadManifest() {
   }
 }
 
+function clearQueryWorkspace() {
+  Object.assign(state, submissionHelpers.clearQueryWorkspaceState(state));
+
+  const grid = $('candidates-grid');
+  if (grid) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    const message = document.createElement('p');
+    message.textContent = 'Chưa tìm kiếm query này';
+    empty.appendChild(message);
+    grid.replaceChildren(empty);
+  }
+  const resultCount = $('results-count');
+  if (resultCount) resultCount.textContent = '0 candidates';
+
+  const image = $('preview-img');
+  if (image) {
+    image.onload = null;
+    image.onerror = null;
+    image.removeAttribute('src');
+    image.style.display = 'none';
+  }
+  const video = $('preview-vid');
+  if (video) {
+    video.onloadeddata = null;
+    video.onerror = null;
+    if (typeof video.pause === 'function') video.pause();
+    video.removeAttribute('src');
+    if (typeof video.load === 'function') video.load();
+    video.style.display = 'none';
+  }
+  const placeholder = $('preview-placeholder');
+  if (placeholder) placeholder.style.display = 'flex';
+  const rankBadge = $('detail-rank-badge');
+  if (rankBadge) rankBadge.textContent = '—';
+  const scoresSection = $('detail-scores-section');
+  if (scoresSection) scoresSection.style.display = 'none';
+  const scoresBody = $('detail-scores-body');
+  if (scoresBody) scoresBody.replaceChildren();
+  const evidenceSection = $('detail-evidence-section');
+  if (evidenceSection) evidenceSection.style.display = 'none';
+  const frameInput = $('frame-input');
+  if (frameInput) frameInput.value = '';
+  const answerInput = $('answer-input');
+  if (answerInput) answerInput.value = '';
+  const trakeContainer = $('frame-picker-trake-container');
+  if (trakeContainer) {
+    trakeContainer.replaceChildren();
+    trakeContainer.style.display = 'none';
+  }
+  const confirmButton = $('btn-confirm-selection');
+  if (confirmButton) confirmButton.disabled = true;
+
+  const iterStatus = $('iter-status-badge');
+  if (iterStatus) iterStatus.textContent = 'Chưa bắt đầu';
+  const iterFinishButton = $('btn-iter-finish');
+  if (iterFinishButton) iterFinishButton.disabled = true;
+  ['btn-iter-prev', 'btn-iter-next', 'btn-iter-skip'].forEach((id) => {
+    const button = $(id);
+    if (button) button.disabled = true;
+  });
+}
+
 function renderManifestList() {
   const list = $('query-manifest-list');
   if (!list) return;
-  list.innerHTML = '';
+  list.replaceChildren();
   state.manifest.forEach((item) => {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = `query-manifest-item${item.query_id === state.currentQueryId ? ' active' : ''}`;
-    button.innerHTML = `<span class="manifest-task">${item.task.toUpperCase()}</span>${item.query_id}`;
+    const queryId = document.createElement('span');
+    queryId.className = 'manifest-query-id';
+    queryId.textContent = item.query_id;
+    const task = document.createElement('span');
+    task.className = 'manifest-task';
+    task.textContent = item.task.toUpperCase();
+    const readiness = submissionHelpers.manifestQueryReadiness(item, state.selections);
+    const status = document.createElement('span');
+    status.className = `manifest-readiness ${readiness.ready ? 'ready' : 'not-ready'}`;
+    status.textContent = readiness.ready ? '✓ Ready' : `⚠ ${readiness.label}`;
+    button.dataset.readiness = readiness.codes.join(',') || 'ready';
+    button.append(queryId, task, status);
     button.addEventListener('click', () => selectManifestQuery(item.query_id));
     list.appendChild(button);
   });
@@ -126,6 +200,7 @@ function selectManifestQuery(queryId) {
   const item = state.manifest.find((entry) => entry.query_id === queryId);
   if (!item) return;
   const form = submissionHelpers.manifestQueryFormState(item);
+  clearQueryWorkspace();
   state.currentQueryId = form.queryId;
   $('query-id-input').value = form.queryId;
   $('export-query-id').value = form.queryId;
@@ -143,7 +218,15 @@ function updateSelectedTrakeState(confirmEvents) {
   if (!item || item.task !== 'trake') return;
   const nEvents = parseInt($('n-events-input').value, 10);
   if (!Number.isInteger(nEvents) || nEvents < 1) {
+    state.manifest = submissionHelpers.updateTrakeState(
+      state.manifest,
+      item.query_id,
+      item.n_events,
+      false,
+    );
     $('trake-events-confirmed').checked = false;
+    saveManifest();
+    renderManifestList();
     toast('Số events TRAKE phải lớn hơn 0', 'warning');
     return;
   }
@@ -173,9 +256,9 @@ function renderValidationReport() {
       const heading = document.createElement('strong');
       heading.textContent = `${title}: ${queryId}`;
       const list = document.createElement('ul');
-      messages.forEach((message) => {
+      messages.forEach((issue) => {
         const line = document.createElement('li');
-        line.textContent = message;
+        line.textContent = submissionHelpers.formatValidationIssue(issue);
         list.appendChild(line);
       });
       group.append(heading, list);
@@ -247,6 +330,11 @@ function selectTask(task) {
   
   if (state.selected !== null) {
     selectCandidate(state.selected);
+  } else {
+    const singleFrame = $('frame-picker-single-row');
+    if (singleFrame) singleFrame.style.display = task === 'trake' ? 'none' : 'flex';
+    const trakeFrames = $('frame-picker-trake-container');
+    if (trakeFrames) trakeFrames.style.display = 'none';
   }
   renderSelectionsList();
 }
@@ -413,12 +501,17 @@ function loadSelections() {
 function selectCandidate(idx) {
   state.selected = idx;
   const c = state.candidates[idx];
+  if (!c) {
+    state.selected = null;
+    $('btn-confirm-selection').disabled = true;
+    return;
+  }
 
   document.querySelectorAll('.candidate-card').forEach((el, i) => {
     el.classList.toggle('selected', i === idx);
   });
 
-  const frameIdx = (c.representative_frames[0] ?? c.start_frame) + 1; // 1-indexed
+  const frameIdx = submissionHelpers.candidateToSubmissionFrame(c);
   const img = $('preview-img');
   const vid = $('preview-vid');
   const placeholder = $('preview-placeholder');
@@ -545,7 +638,7 @@ function grabTrakeFrame(index, e) {
     frameVal = Math.round(vid.currentTime * fps) + 1;
   } else if (state.selected !== null) {
     const c = state.candidates[state.selected];
-    frameVal = (c.representative_frames[0] ?? c.start_frame) + 1;
+    frameVal = submissionHelpers.candidateToSubmissionFrame(c);
   }
   const input = $(`trake-frame-input-${index}`);
   if (input) {
@@ -566,7 +659,7 @@ function confirmSelection() {
 
   if (state.task === 'kis') {
     const frameInput = parseInt($('frame-input').value, 10);
-    const frame = isNaN(frameInput) ? (c.representative_frames[0] ?? c.start_frame) + 1 : frameInput;
+    const frame = isNaN(frameInput) ? submissionHelpers.candidateToSubmissionFrame(c) : frameInput;
     
     const isDup = state.selections.some(s => s.queryId === queryId && s.video_id === c.video_id && s.frames[0] === frame);
     if (isDup) {
@@ -586,14 +679,14 @@ function confirmSelection() {
   } 
   else if (state.task === 'qa') {
     const frameInput = parseInt($('frame-input').value, 10);
-    const frame = isNaN(frameInput) ? (c.representative_frames[0] ?? c.start_frame) + 1 : frameInput;
+    const frame = isNaN(frameInput) ? submissionHelpers.candidateToSubmissionFrame(c) : frameInput;
     const answer = submissionHelpers.prepareQaAnswer($('answer-input').value);
     
     if (!answer.trim()) {
       toast('Vui lòng nhập câu trả lời cho Q&A!', 'warning');
       return;
     }
-    if (answer.length > 100) {
+    if (submissionHelpers.unicodeCodePointLength(answer) > 100) {
       toast('Câu trả lời vượt quá giới hạn 100 ký tự!', 'error');
       return;
     }
@@ -655,12 +748,14 @@ function confirmSelection() {
   
   saveSelections();
   renderSelectionsList();
+  renderManifestList();
 }
 
 function removeSelection(idx) {
   state.selections.splice(idx, 1);
   saveSelections();
   renderSelectionsList();
+  renderManifestList();
   if ($('view-export').classList.contains('active')) {
     renderExportTable();
   }
@@ -778,7 +873,7 @@ function iterFinish() {
 
   const queryId = currentQueryId();
   state.iterMatchedList.forEach(c => {
-    const frame = c.representative_frames[0] ?? c.start_frame;
+    const frame = submissionHelpers.candidateToSubmissionFrame(c);
     const existing = state.selections.findIndex(s => s.video_id === c.video_id && s.queryId === queryId);
     if (existing < 0) {
       state.selections.push({ video_id: c.video_id, frames: [frame], answer: '', queryId, task: state.task, rank: c.rank });
@@ -786,6 +881,7 @@ function iterFinish() {
   });
   saveSelections();
   renderSelectionsList();
+  renderManifestList();
   toast(`Iterative xong: ${state.iterMatchedList.length} matched, ${state.iterUnsureList.length} unsure`, 'success');
 }
 
@@ -949,6 +1045,7 @@ function removeQuerySelections(queryId) {
     state.selections = state.selections.filter(s => s.queryId !== queryId);
     saveSelections();
     renderSelectionsList();
+    renderManifestList();
     renderExportTable();
     toast(`Đã xoá các lựa chọn của query ${queryId}`, 'info');
   }
@@ -1039,7 +1136,15 @@ function renderExportTable() {
   const summary = getQuerySummary();
 
   if (!summary.length) {
-    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:32px">Chưa có kết quả. Hãy tìm kiếm và xác nhận lựa chọn trước.</td></tr>';
+    const row = document.createElement('tr');
+    const cell = document.createElement('td');
+    cell.setAttribute('colspan', '5');
+    cell.style.textAlign = 'center';
+    cell.style.color = 'var(--text-muted)';
+    cell.style.padding = '32px';
+    cell.textContent = 'Chưa có kết quả. Hãy tìm kiếm và xác nhận lựa chọn trước.';
+    row.appendChild(cell);
+    tbody.replaceChildren(row);
     count.textContent = '0 queries';
     $('export-review-card').style.display = 'none';
     refreshPreview();
@@ -1047,10 +1152,12 @@ function renderExportTable() {
   }
 
   count.textContent = `${summary.length} quer${summary.length !== 1 ? 'ies' : 'y'}`;
-
-  tbody.innerHTML = summary.map((q, idx) => {
+  tbody.replaceChildren();
+  summary.forEach((q) => {
     let detailsText = '';
-    let statusText = q.selections.length ? '<span class="badge badge-green">✓ Ready</span>' : '<span class="badge badge-amber">⚠️ Chưa có dòng</span>';
+    let statusText = q.selections.length ? '✓ Ready' : '⚠️ Chưa có dòng';
+    let statusClass = q.selections.length ? 'badge badge-green' : 'badge badge-amber';
+    let statusTitle = '';
     
     if (q.task === 'kis') {
       detailsText = `${q.selections.length} cảnh (KIS)`;
@@ -1061,24 +1168,68 @@ function renderExportTable() {
       const n_events = q.n_events;
       const incomplete = !q.events_confirmed || !Number.isInteger(n_events) || q.selections.some(s => s.frames.length !== n_events);
       if (incomplete) {
-        statusText = `<span class="badge badge-amber" title="Có dòng chưa đủ ${n_events} sự kiện">⚠️ Thiếu event</span>`;
+        statusText = '⚠️ Thiếu event';
+        statusClass = 'badge badge-amber';
+        statusTitle = `Có dòng chưa đủ ${n_events} sự kiện`;
       }
     }
-    
-    return `
-      <tr>
-        <td style="font-family:'JetBrains Mono',monospace;font-size:12px">${q.queryId}</td>
-        <td><span class="badge badge-purple">${q.task.toUpperCase()}</span></td>
-        <td style="font-size:12px;color:var(--text-secondary);max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${detailsText}">${detailsText}</td>
-        <td>${statusText}</td>
-        <td>
-          <div style="display:flex; gap:6px;">
-            <button class="btn-translate" style="padding:2px 8px; font-size:11px;" onclick="showExportReview('${q.queryId}')">👁️ Xem</button>
-            <button class="btn-translate" style="padding:2px 8px; font-size:11px; color:var(--red); border-color:rgba(239,68,68,0.25); background:rgba(239,68,68,0.1);" onclick="removeQuerySelections('${q.queryId}')">✕ Xoá</button>
-          </div>
-        </td>
-      </tr>`;
-  }).join('');
+
+    const row = document.createElement('tr');
+    const queryCell = document.createElement('td');
+    queryCell.style.fontFamily = "'JetBrains Mono', monospace";
+    queryCell.style.fontSize = '12px';
+    queryCell.textContent = q.queryId;
+
+    const taskCell = document.createElement('td');
+    const taskBadge = document.createElement('span');
+    taskBadge.className = 'badge badge-purple';
+    taskBadge.textContent = q.task.toUpperCase();
+    taskCell.appendChild(taskBadge);
+
+    const detailsCell = document.createElement('td');
+    detailsCell.style.fontSize = '12px';
+    detailsCell.style.color = 'var(--text-secondary)';
+    detailsCell.style.maxWidth = '250px';
+    detailsCell.style.overflow = 'hidden';
+    detailsCell.style.textOverflow = 'ellipsis';
+    detailsCell.style.whiteSpace = 'nowrap';
+    detailsCell.setAttribute('title', detailsText);
+    detailsCell.textContent = detailsText;
+
+    const statusCell = document.createElement('td');
+    const statusBadge = document.createElement('span');
+    statusBadge.className = statusClass;
+    statusBadge.textContent = statusText;
+    if (statusTitle) statusBadge.setAttribute('title', statusTitle);
+    statusCell.appendChild(statusBadge);
+
+    const actionCell = document.createElement('td');
+    const actions = document.createElement('div');
+    actions.style.display = 'flex';
+    actions.style.gap = '6px';
+    const reviewButton = document.createElement('button');
+    reviewButton.type = 'button';
+    reviewButton.className = 'btn-translate';
+    reviewButton.style.padding = '2px 8px';
+    reviewButton.style.fontSize = '11px';
+    reviewButton.textContent = '👁️ Xem';
+    reviewButton.addEventListener('click', () => showExportReview(q.queryId));
+    const removeButton = document.createElement('button');
+    removeButton.type = 'button';
+    removeButton.className = 'btn-translate';
+    removeButton.style.padding = '2px 8px';
+    removeButton.style.fontSize = '11px';
+    removeButton.style.color = 'var(--red)';
+    removeButton.style.borderColor = 'rgba(239,68,68,0.25)';
+    removeButton.style.background = 'rgba(239,68,68,0.1)';
+    removeButton.textContent = '✕ Xoá';
+    removeButton.addEventListener('click', () => removeQuerySelections(q.queryId));
+    actions.append(reviewButton, removeButton);
+    actionCell.appendChild(actions);
+
+    row.append(queryCell, taskCell, detailsCell, statusCell, actionCell);
+    tbody.appendChild(row);
+  });
 
   refreshPreview();
 }
@@ -1224,6 +1375,7 @@ document.addEventListener('DOMContentLoaded', () => {
   if (state.manifest.length) selectManifestQuery(state.manifest[0].query_id);
   else selectTask('kis');
   $('query-id-input').addEventListener('input', () => {
+    clearQueryWorkspace();
     $('export-query-id').value = $('query-id-input').value;
     state.currentQueryId = null;
     renderManifestList();
@@ -1309,7 +1461,7 @@ async function handleQueryFileUpload(event) {
     }
     const payload = await response.json();
     const report = response.ok ? payload : payload.detail;
-    if (Array.isArray(report.manifest)) {
+    if (submissionHelpers.canInstallManifest(response.ok, report)) {
       state.manifest = report.manifest.reduce(
         (items, item) => submissionHelpers.upsertManifestItem(items, item),
         [],

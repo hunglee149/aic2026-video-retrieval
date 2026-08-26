@@ -14,6 +14,22 @@ test('preserves Q&A answer whitespace while checking the task eligibility', () =
   assert.equal(helpers.canUseIterative('trake'), false);
 });
 
+test('counts Q&A answer length in Unicode code points', () => {
+  assert.equal(helpers.unicodeCodePointLength?.('a😀𠜎'), 3);
+  assert.equal(helpers.unicodeCodePointLength?.('😀'.repeat(100)), 100);
+});
+
+test('converts every candidate frame to the one-based submission frame', () => {
+  assert.equal(helpers.candidateToSubmissionFrame?.({
+    representative_frames: [0],
+    start_frame: 7,
+  }), 1);
+  assert.equal(helpers.candidateToSubmissionFrame?.({
+    representative_frames: [],
+    start_frame: 7,
+  }), 8);
+});
+
 test('infers a task only from an exact query TXT suffix', () => {
   assert.equal(helpers.inferTaskFromFilename('query-p1-1-kis.txt'), 'kis');
   assert.equal(helpers.inferTaskFromFilename('query_p1_1_kis.txt'), 'kis');
@@ -91,19 +107,95 @@ test('selecting a manifest query clears stale translated text', () => {
   });
 });
 
-test('groups backend validation issues by query', () => {
+test('clears query-local candidate state without discarding saved selections', () => {
+  const selections = [{ queryId: 'query-p1-2-qa', answer: 'Đáp án đã lưu' }];
+  const manifest = [{ query_id: 'query-p1-2-qa', task: 'qa' }];
+  const next = helpers.clearQueryWorkspaceState?.({
+    task: 'kis',
+    candidates: [{ video_id: 'L01_V001' }],
+    selected: 0,
+    selections,
+    manifest,
+    currentFps: 25,
+    iterCandidates: [{ video_id: 'L01_V001' }],
+    iterCursor: 3,
+    iterRound: 2,
+    iterRunning: true,
+    iterVerdict: { stale: 'matched' },
+    iterMatchedList: [{ video_id: 'L01_V001' }],
+    iterUnsureList: [{ video_id: 'L01_V002' }],
+    iterExcluded: new Set(['stale']),
+  });
+
+  assert.equal(next?.selections, selections);
+  assert.equal(next?.manifest, manifest);
+  assert.deepEqual(next?.candidates, []);
+  assert.equal(next?.selected, null);
+  assert.equal(next?.currentFps, null);
+  assert.deepEqual(next?.iterCandidates, []);
+  assert.equal(next?.iterRunning, false);
+  assert.deepEqual(next?.iterVerdict, {});
+  assert.equal(next?.iterExcluded.size, 0);
+});
+
+test('installs an uploaded manifest only after both HTTP and report validation pass', () => {
+  assert.equal(helpers.canInstallManifest?.(true, { ok: true, manifest: [] }), true);
+  assert.equal(helpers.canInstallManifest?.(false, { ok: true, manifest: [] }), false);
+  assert.equal(helpers.canInstallManifest?.(true, { ok: false, manifest: [] }), false);
+  assert.equal(helpers.canInstallManifest?.(true, { ok: true }), false);
+});
+
+test('reports manifest readiness for missing rows and unconfirmed TRAKE events', () => {
+  const query = {
+    query_id: 'query-p1-3-trake',
+    task: 'trake',
+    events_confirmed: false,
+  };
+
+  assert.deepEqual(helpers.manifestQueryReadiness?.(query, []), {
+    ready: false,
+    codes: ['missing_rows', 'trake_events_unconfirmed'],
+    label: 'Chưa có dòng · Chưa xác nhận events',
+  });
+  assert.deepEqual(helpers.manifestQueryReadiness?.(query, [
+    { queryId: 'query-p1-3-trake', frames: [10, 20] },
+  ]), {
+    ready: false,
+    codes: ['trake_events_unconfirmed'],
+    label: 'Chưa xác nhận events',
+  });
+  assert.deepEqual(helpers.manifestQueryReadiness?.(
+    { ...query, events_confirmed: true },
+    [{ queryId: 'query-p1-3-trake', frames: [10, 20] }],
+  ), {
+    ready: true,
+    codes: [],
+    label: 'Ready',
+  });
+});
+
+test('groups backend validation issues by query without discarding code or row', () => {
   const groups = helpers.groupValidationIssues([
-    { query_id: 'query-p1-1-kis', message: 'Frame must be an integer' },
-    { query_id: 'query-p1-2-qa', message: 'Answer is required' },
-    { query_id: 'query-p1-1-kis', message: 'Too many rows' },
+    { code: 'invalid_frame', query_id: 'query-p1-1-kis', row: 2, message: 'Frame must be an integer' },
+    { code: 'qa_missing_answer', query_id: 'query-p1-2-qa', row: 4, message: 'Answer is required' },
+    { code: 'too_many_rows', query_id: 'query-p1-1-kis', row: null, message: 'Too many rows' },
     { message: 'Manifest is missing' },
   ]);
 
   assert.deepEqual(groups, {
-    'query-p1-1-kis': ['Frame must be an integer', 'Too many rows'],
-    'query-p1-2-qa': ['Answer is required'],
-    general: ['Manifest is missing'],
+    'query-p1-1-kis': [
+      { code: 'invalid_frame', query_id: 'query-p1-1-kis', row: 2, message: 'Frame must be an integer' },
+      { code: 'too_many_rows', query_id: 'query-p1-1-kis', row: null, message: 'Too many rows' },
+    ],
+    'query-p1-2-qa': [
+      { code: 'qa_missing_answer', query_id: 'query-p1-2-qa', row: 4, message: 'Answer is required' },
+    ],
+    general: [{ message: 'Manifest is missing' }],
   });
+  assert.equal(
+    helpers.formatValidationIssue?.(groups['query-p1-1-kis'][0]),
+    '[invalid_frame] — query query-p1-1-kis · row 2 — Frame must be an integer',
+  );
 });
 
 test('submission controls are visible in the baseline UI', () => {
