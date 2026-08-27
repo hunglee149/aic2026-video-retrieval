@@ -1,0 +1,22 @@
+.git
+.github
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.coverage
+htmlcov
+.env
+*.zip
+
+# Never send local copies of the huge AIC dataset into Docker build context.
+data/**
+!data/.gitkeep
+local/**
+
+# Dev-only files are not needed by the runtime image.
+notebooks
+eval
+tests

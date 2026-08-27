@@ -81,6 +81,7 @@ SIGLIP_INDEX_PATH = _optional_path("AIC_SIGLIP_INDEX_PATH")
 SIGLIP_META_PATH = _optional_path("AIC_SIGLIP_META_PATH")
 USE_DUMMY = os.environ.get("AIC_USE_DUMMY", "0") == "1"
 DISABLE_NEURAL = os.environ.get("AIC_DISABLE_NEURAL", "0").strip() == "1"
+ENABLE_BM25 = os.environ.get("AIC_ENABLE_BM25", "1").strip() == "1"
 
 AIC_USE_CLOUD_MEDIA = os.environ.get("AIC_USE_CLOUD_MEDIA", "1") == "1"
 HF_DATASET_URL = os.environ.get("AIC_HF_DATASET_URL", "https://huggingface.co/datasets/manhha2502/fullhd/resolve/main")
@@ -203,6 +204,7 @@ def build_retriever_registry(
     text_index,
     dummy_module,
     disable_neural: bool = False,
+    enable_bm25: bool = True,
 ):
     """Dựng danh sách retriever + trạng thái từng nguồn. Hàm thuần, dễ test."""
     if use_dummy:
@@ -238,7 +240,10 @@ def build_retriever_registry(
 
     register("clip", (clip_index, clip_meta), _clip_factory, neural_off)
     register("siglip", (siglip_index, siglip_meta), _siglip_factory, neural_off)
-    register("bm25", (text_index,), _text_factory)
+    if enable_bm25:
+        register("bm25", (text_index,), _text_factory)
+    else:
+        statuses.append(_slot("bm25", "disabled", "bm25: AIC_ENABLE_BM25=0"))
 
     if not retrievers:
         logger.error(
@@ -261,6 +266,7 @@ def _ensure_retrievers():
             text_index=TEXT_INDEX_PATH,
             dummy_module=dummy,
             disable_neural=DISABLE_NEURAL,
+            enable_bm25=ENABLE_BM25,
         )
         return _retrievers, _retriever_status
 
@@ -454,6 +460,12 @@ def import_query_pack_texts(req: QueryPackTextsRequest):
     return _query_pack_response(parse_query_files(files))
 
 
+@app.get("/healthz")
+def healthz():
+    """Lightweight health check that does not load ML models or indexes."""
+    return {"ok": True}
+
+
 @app.get("/api/status")
 def status():
     """Trạng thái từng nguồn retrieval + đường dẫn logical đang dùng."""
@@ -472,6 +484,7 @@ def status():
         "ready_count": len(ready),
         "keyframes_dir": str(KEYFRAMES_DIR),
         "use_dummy": USE_DUMMY,
+        "bm25_enabled": ENABLE_BM25,
         "paths": {
             "clip_index": str(INDEX_PATH),
             "clip_meta": str(META_PATH),

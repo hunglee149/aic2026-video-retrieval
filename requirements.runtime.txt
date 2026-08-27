@@ -1,0 +1,8 @@
+numpy>=1.24
+faiss-cpu>=1.7.4
+open-clip-torch>=2.24
+transformers>=4.40
+sentencepiece>=0.2
+sacremoses>=0.1
+fastapi>=0.111
+uvicorn[standard]>=0.29
