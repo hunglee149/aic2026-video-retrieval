@@ -65,9 +65,33 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 KEYFRAMES_DIR = Path(os.environ.get("AIC_KEYFRAMES_DIR", "data/keyframes"))
-INDEX_PATH = Path(os.environ.get("AIC_INDEX_PATH", "local/clip_faiss.index"))
-META_PATH = Path(os.environ.get("AIC_META_PATH", "local/clip_metadata.json"))
-TEXT_INDEX_PATH = Path(os.environ.get("AIC_TEXT_INDEX_PATH", "data/input/input/index/text_search_index.pkl"))
+
+def resolve_path(local_path: Optional[Path]) -> Optional[Path]:
+    """Kiểm tra nếu path local không tồn tại, tự động tải từ Hugging Face Hub."""
+    if local_path is None:
+        return None
+    if local_path.exists():
+        return local_path
+
+    repo_id = os.environ.get("AIC_HF_REPO_ID", "manhha2502/fullhd")
+    filename = local_path.as_posix()
+    try:
+        from huggingface_hub import hf_hub_download
+        logger.info("File %s không tồn tại local. Đang tải từ Hugging Face dataset %s...", local_path, repo_id)
+        cached_path = hf_hub_download(
+            repo_id=repo_id,
+            filename=filename,
+            repo_type="dataset",
+            cache_dir=os.environ.get("AIC_HF_CACHE_DIR")
+        )
+        return Path(cached_path)
+    except Exception as e:
+        logger.warning("Không thể tải %s từ Hugging Face: %s. Sẽ dùng path local ban đầu.", filename, e)
+        return local_path
+
+INDEX_PATH = resolve_path(Path(os.environ.get("AIC_INDEX_PATH", "local/clip_faiss.index")))
+META_PATH = resolve_path(Path(os.environ.get("AIC_META_PATH", "local/clip_metadata.json")))
+TEXT_INDEX_PATH = resolve_path(Path(os.environ.get("AIC_TEXT_INDEX_PATH", "data/input/input/index/text_search_index.pkl")))
 
 
 def _optional_path(name: str) -> Optional[Path]:
@@ -77,14 +101,14 @@ def _optional_path(name: str) -> Optional[Path]:
 
 
 MAP_KEYFRAMES_DIR = _optional_path("AIC_MAP_KEYFRAMES_DIR")
-SIGLIP_INDEX_PATH = _optional_path("AIC_SIGLIP_INDEX_PATH")
-SIGLIP_META_PATH = _optional_path("AIC_SIGLIP_META_PATH")
+SIGLIP_INDEX_PATH = resolve_path(_optional_path("AIC_SIGLIP_INDEX_PATH"))
+SIGLIP_META_PATH = resolve_path(_optional_path("AIC_SIGLIP_META_PATH"))
 USE_DUMMY = os.environ.get("AIC_USE_DUMMY", "0") == "1"
 DISABLE_NEURAL = os.environ.get("AIC_DISABLE_NEURAL", "0").strip() == "1"
 
 AIC_USE_CLOUD_MEDIA = os.environ.get("AIC_USE_CLOUD_MEDIA", "1") == "1"
 HF_DATASET_URL = os.environ.get("AIC_HF_DATASET_URL", "https://huggingface.co/datasets/manhha2502/fullhd/resolve/main")
-VIDEO_METADATA_PATH = Path("local/video_metadata.json")
+VIDEO_METADATA_PATH = resolve_path(Path("local/video_metadata.json"))
 _video_metadata = {}
 
 def load_video_metadata():
