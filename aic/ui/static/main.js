@@ -227,12 +227,59 @@ function renderManifestList() {
     const readiness = submissionHelpers.manifestQueryReadiness(item, state.selections);
     const status = document.createElement('span');
     status.className = `manifest-readiness ${readiness.ready ? 'ready' : 'not-ready'}`;
-    status.textContent = readiness.ready ? '✓ Ready' : `⚠ ${readiness.label}`;
+    status.textContent = readiness.ready ? 'Ready' : readiness.label;
     button.dataset.readiness = readiness.codes.join(',') || 'ready';
     button.append(queryId, task, status);
     button.addEventListener('click', () => selectManifestQuery(item.query_id));
     list.appendChild(button);
   });
+}
+
+function clearAllCache() {
+  if (!confirm('Bạn có chắc chắn muốn xóa toàn bộ cache? Tất cả câu hỏi đã tải lên, các câu trả lời đã lưu, và lịch sử tìm kiếm sẽ bị xóa sạch.')) {
+    return;
+  }
+  localStorage.removeItem('aic_selections');
+  localStorage.removeItem('aic_manifest');
+  localStorage.removeItem('aic_query_cache');
+  window.location.reload();
+}
+
+function saveQueryCache() {
+  const serialized = {};
+  for (const [qid, cache] of Object.entries(state.queryCache)) {
+    if (!cache) continue;
+    serialized[qid] = Object.assign({}, cache, {
+      iterExcluded: Array.from(cache.iterExcluded || []),
+    });
+  }
+  try {
+    localStorage.setItem('aic_query_cache', JSON.stringify(serialized));
+  } catch (e) {
+    console.error('Failed to write local storage:', e);
+  }
+}
+
+function loadQueryCache() {
+  const data = localStorage.getItem('aic_query_cache');
+  if (data) {
+    try {
+      const parsed = JSON.parse(data);
+      const deserialized = {};
+      for (const [qid, cache] of Object.entries(parsed)) {
+        if (!cache) continue;
+        deserialized[qid] = Object.assign({}, cache, {
+          iterExcluded: new Set(cache.iterExcluded || []),
+        });
+      }
+      state.queryCache = deserialized;
+    } catch (e) {
+      console.error('Failed to parse query cache:', e);
+      state.queryCache = {};
+    }
+  } else {
+    state.queryCache = {};
+  }
 }
 
 function saveCurrentQueryToCache() {
@@ -255,6 +302,7 @@ function saveCurrentQueryToCache() {
     iterUnsureList: state.iterUnsureList || [],
     iterExcluded: new Set(state.iterExcluded),
   };
+  saveQueryCache();
 }
 
 function loadQueryFromCache(queryId, form) {
@@ -275,7 +323,7 @@ function loadQueryFromCache(queryId, form) {
     state.iterVerdict = Object.assign({}, cached.iterVerdict);
     state.iterMatchedList = cached.iterMatchedList || [];
     state.iterUnsureList = cached.iterUnsureList || [];
-    state.iterExcluded = new Set(cached.iterExcluded);
+    state.iterExcluded = new Set(cached.iterExcluded || []);
 
     if (state.candidates.length) {
       renderCandidates();
@@ -1302,7 +1350,7 @@ function renderExportTable() {
   tbody.replaceChildren();
   summary.forEach((q) => {
     let detailsText = '';
-    let statusText = q.selections.length ? '✓ Ready' : '⚠️ Chưa có dòng';
+    let statusText = q.selections.length ? 'Ready' : 'Chưa có dòng';
     let statusClass = q.selections.length ? 'badge badge-green' : 'badge badge-amber';
     let statusTitle = '';
     
@@ -1315,7 +1363,7 @@ function renderExportTable() {
       const n_events = q.n_events;
       const incomplete = !q.events_confirmed || !Number.isInteger(n_events) || q.selections.some(s => s.frames.length !== n_events);
       if (incomplete) {
-        statusText = '⚠️ Thiếu event';
+        statusText = 'Thiếu event';
         statusClass = 'badge badge-amber';
         statusTitle = `Có dòng chưa đủ ${n_events} sự kiện`;
       }
@@ -1359,7 +1407,7 @@ function renderExportTable() {
     reviewButton.className = 'btn-translate';
     reviewButton.style.padding = '2px 8px';
     reviewButton.style.fontSize = '11px';
-    reviewButton.textContent = '👁️ Xem';
+    reviewButton.textContent = 'Xem';
     reviewButton.addEventListener('click', () => showExportReview(q.queryId));
     const removeButton = document.createElement('button');
     removeButton.type = 'button';
@@ -1369,7 +1417,7 @@ function renderExportTable() {
     removeButton.style.color = 'var(--red)';
     removeButton.style.borderColor = 'rgba(239,68,68,0.25)';
     removeButton.style.background = 'rgba(239,68,68,0.1)';
-    removeButton.textContent = '✕ Xoá';
+    removeButton.textContent = 'Xoá';
     removeButton.addEventListener('click', () => removeQuerySelections(q.queryId));
     actions.append(reviewButton, removeButton);
     actionCell.appendChild(actions);
@@ -1515,6 +1563,7 @@ document.addEventListener('keydown', (e) => {
 // ---------------------------------------------------------------------------
 
 document.addEventListener('DOMContentLoaded', () => {
+  loadQueryCache();
   loadSelections();
   loadManifest();
   checkStatus();
@@ -1558,6 +1607,9 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  window.addEventListener('beforeunload', () => {
+    saveCurrentQueryToCache();
+  });
 });
 
 // Nạp query pack ZIP hoặc một/nhiều query TXT.
@@ -1600,6 +1652,7 @@ async function handleQueryFileUpload(event) {
     if (submissionHelpers.canInstallManifest(response.ok, report)) {
       if (zipFiles.length === 1) {
         state.queryCache = {}; // Reset cache only when loading a completely new ZIP query pack
+        saveQueryCache();
       }
       state.manifest = report.manifest.reduce(
         (items, item) => submissionHelpers.upsertManifestItem(items, item),
