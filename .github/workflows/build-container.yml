@@ -3,7 +3,7 @@ name: Build and Deploy AIC
 on:
   push:
     branches:
-      - deploy
+      - Duong/deploy
 
 permissions:
   contents: read
