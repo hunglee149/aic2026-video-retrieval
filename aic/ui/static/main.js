@@ -30,6 +30,8 @@ const state = {
   iterMatchedList: [],
   iterUnsureList: [],
   iterExcluded: new Set(),
+
+  queryCache: {},
 };
 
 // ---------------------------------------------------------------------------
@@ -233,19 +235,84 @@ function renderManifestList() {
   });
 }
 
+function saveCurrentQueryToCache() {
+  const queryId = state.currentQueryId;
+  if (!queryId) return;
+
+  state.queryCache[queryId] = {
+    translatedText: $('translated-text')?.value || '',
+    candidates: state.candidates || [],
+    selected: state.selected,
+    candidateDraftFrames: Object.assign({}, state.candidateDraftFrames),
+    currentFps: state.currentFps,
+    currentPlaybackFrame: state.currentPlaybackFrame,
+    iterCandidates: state.iterCandidates || [],
+    iterCursor: state.iterCursor,
+    iterRound: state.iterRound,
+    iterRunning: state.iterRunning,
+    iterVerdict: Object.assign({}, state.iterVerdict),
+    iterMatchedList: state.iterMatchedList || [],
+    iterUnsureList: state.iterUnsureList || [],
+    iterExcluded: new Set(state.iterExcluded),
+  };
+}
+
+function loadQueryFromCache(queryId, form) {
+  const cached = state.queryCache[queryId];
+  if (cached) {
+    $('translated-text').value = cached.translatedText || '';
+    
+    state.candidates = cached.candidates || [];
+    state.selected = cached.selected;
+    state.candidateDraftFrames = Object.assign({}, cached.candidateDraftFrames);
+    state.currentFps = cached.currentFps;
+    state.currentPlaybackFrame = cached.currentPlaybackFrame;
+    
+    state.iterCandidates = cached.iterCandidates || [];
+    state.iterCursor = cached.iterCursor;
+    state.iterRound = cached.iterRound;
+    state.iterRunning = cached.iterRunning;
+    state.iterVerdict = Object.assign({}, cached.iterVerdict);
+    state.iterMatchedList = cached.iterMatchedList || [];
+    state.iterUnsureList = cached.iterUnsureList || [];
+    state.iterExcluded = new Set(cached.iterExcluded);
+
+    if (state.candidates.length) {
+      renderCandidates();
+      $('results-count').textContent = `${state.candidates.length} candidates`;
+      if (state.selected !== null) {
+        selectCandidate(state.selected);
+      }
+    } else {
+      clearQueryWorkspace();
+    }
+  } else {
+    $('translated-text').value = form.translatedText || '';
+    clearQueryWorkspace();
+  }
+}
+
 function selectManifestQuery(queryId) {
+  saveCurrentQueryToCache();
+
   const item = state.manifest.find((entry) => entry.query_id === queryId);
   if (!item) return;
+
+  // Clear current candidates/selected before selectTask to prevent loading mismatch
+  state.selected = null;
+  state.candidates = [];
+
   const form = submissionHelpers.manifestQueryFormState(item);
-  clearQueryWorkspace();
   state.currentQueryId = form.queryId;
   $('query-id-input').value = form.queryId;
   $('export-query-id').value = form.queryId;
   $('query-input').value = form.text;
-  $('translated-text').value = form.translatedText;
   $('n-events-input').value = form.nEvents;
   $('trake-events-confirmed').checked = form.eventsConfirmed;
   selectTask(form.task);
+
+  loadQueryFromCache(form.queryId, form);
+
   renderManifestList();
   renderSelectionsList();
 }
@@ -471,20 +538,19 @@ function renderCandidates() {
       </div>
       <div class="card-body">
         <div class="card-video-id">${c.video_id}</div>
-        <div class="card-frame">frame ${frameIdx} &mdash; ${c.start_frame}&rarr;${c.end_frame}</div>
-      </div>
-      <div class="verdict-row">
-        <button class="verdict-btn v-matched ${verdict === 'matched' ? 'active' : ''}"
-          onclick="setVerdict(${idx},'matched',event)" title="Matched">✓</button>
-        <button class="verdict-btn v-not ${verdict === 'not_matched' ? 'active' : ''}"
-          onclick="setVerdict(${idx},'not_matched',event)" title="Not matched">✗</button>
-        <button class="verdict-btn v-unsure ${verdict === 'unsure' ? 'active' : ''}"
-          onclick="setVerdict(${idx},'unsure',event)" title="Unsure">?</button>
       </div>`;
 
     card.addEventListener('click', (e) => {
-      if (e.target.closest('.verdict-btn')) return;
-      selectCandidate(idx);
+      let forceOriginal = false;
+      if (state.selected === idx) {
+        // Discard draft edit and revert to original frame index
+        const c = state.candidates[idx];
+        if (c) {
+          delete state.candidateDraftFrames[candidateKey(c)];
+          forceOriginal = true;
+        }
+      }
+      selectCandidate(idx, forceOriginal);
     });
     grid.appendChild(card);
   });
@@ -535,7 +601,11 @@ function loadSelections() {
   }
 }
 
-function selectCandidate(idx) {
+function selectCandidate(idx, forceOriginal = false) {
+  // Clear any existing draft frame when switching to a different candidate!
+  if (state.selected !== idx) {
+    state.candidateDraftFrames = {};
+  }
   state.selected = idx;
   const c = state.candidates[idx];
   if (!c) {
@@ -559,34 +629,53 @@ function selectCandidate(idx) {
   
   const queryId = currentQueryId();
   const draftFrame = state.candidateDraftFrames[candidateKey(c)];
-  const initialFrame = Number.isInteger(draftFrame) ? draftFrame : frameIdx;
+  const existing = state.selections.find(s => s.queryId === queryId && s.video_id === c.video_id);
+  
+  let initialFrame = frameIdx;
+  if (!forceOriginal) {
+    if (Number.isInteger(draftFrame)) {
+      initialFrame = draftFrame;
+    } else if (existing && Number.isInteger(existing.frame)) {
+      initialFrame = existing.frame;
+    }
+  }
+  
   state.currentPlaybackFrame = initialFrame;
   const playbackFrame = $('video-current-frame');
   if (playbackFrame) playbackFrame.textContent = String(initialFrame);
-
-  // Confirmed rows remain independent from the candidate's editable draft.
-  const existing = state.selections.find(s => s.queryId === queryId && s.video_id === c.video_id);
   
   if (vid) {
-    // Hiển thị Video, fallback sang keyframe nếu video lỗi
-    vid.src = `/api/video/${c.video_id}`;
-    vid.onloadeddata = async () => {
+    const targetSrc = `/api/video/${c.video_id}`;
+    const currentPath = vid.src ? new URL(vid.src, window.location.href).pathname : '';
+    const targetPath = new URL(targetSrc, window.location.href).pathname;
+
+    if (currentPath === targetPath && vid.readyState >= 1) {
       vid.style.display = 'block';
       placeholder.style.display = 'none';
       img.style.display = 'none';
-      
-      // Tìm FPS để seek
-      try {
-        const res = await fetch(`/api/video_info/${c.video_id}`);
-        if (res.ok) {
-          const data = await res.json();
-          state.currentFps = data.fps;
-          vid.currentTime = Math.max(0, initialFrame - 1) / data.fps;
+      const fps = state.currentFps || 25;
+      vid.currentTime = Math.max(0, initialFrame - 1) / fps;
+    } else {
+      // Hiển thị Video, fallback sang keyframe nếu video lỗi
+      vid.src = targetSrc;
+      vid.onloadeddata = async () => {
+        vid.style.display = 'block';
+        placeholder.style.display = 'none';
+        img.style.display = 'none';
+        
+        // Tìm FPS để seek
+        try {
+          const res = await fetch(`/api/video_info/${c.video_id}`);
+          if (res.ok) {
+            const data = await res.json();
+            state.currentFps = data.fps;
+            vid.currentTime = Math.max(0, initialFrame - 1) / data.fps;
+          }
+        } catch (e) {
+          console.warn('Cannot fetch video info:', e);
         }
-      } catch (e) {
-        console.warn('Cannot fetch video info:', e);
-      }
-    };
+      };
+    }
     vid.onerror = () => {
       vid.style.display = 'none';
       // Load ảnh keyframe thay thế
@@ -1509,6 +1598,9 @@ async function handleQueryFileUpload(event) {
     const payload = await response.json();
     const report = response.ok ? payload : payload.detail;
     if (submissionHelpers.canInstallManifest(response.ok, report)) {
+      if (zipFiles.length === 1) {
+        state.queryCache = {}; // Reset cache only when loading a completely new ZIP query pack
+      }
       state.manifest = report.manifest.reduce(
         (items, item) => submissionHelpers.upsertManifestItem(items, item),
         [],

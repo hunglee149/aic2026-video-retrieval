@@ -480,7 +480,7 @@ input[type="range"]::-webkit-slider-thumb {
   position: relative;
   display: flex;
   flex-direction: column;
-  min-height: 220px;
+  min-height: unset;
 }
 .candidate-card:hover {
   border-color: rgba(124,58,237,0.35);

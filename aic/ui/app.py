@@ -37,7 +37,7 @@ if env_path.exists():
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -81,6 +81,23 @@ SIGLIP_INDEX_PATH = _optional_path("AIC_SIGLIP_INDEX_PATH")
 SIGLIP_META_PATH = _optional_path("AIC_SIGLIP_META_PATH")
 USE_DUMMY = os.environ.get("AIC_USE_DUMMY", "0") == "1"
 DISABLE_NEURAL = os.environ.get("AIC_DISABLE_NEURAL", "0").strip() == "1"
+
+AIC_USE_CLOUD_MEDIA = os.environ.get("AIC_USE_CLOUD_MEDIA", "1") == "1"
+HF_DATASET_URL = os.environ.get("AIC_HF_DATASET_URL", "https://huggingface.co/datasets/manhha2502/fullhd/resolve/main")
+VIDEO_METADATA_PATH = Path("local/video_metadata.json")
+_video_metadata = {}
+
+def load_video_metadata():
+    global _video_metadata
+    if not _video_metadata and VIDEO_METADATA_PATH.exists():
+        try:
+            import json
+            with open(VIDEO_METADATA_PATH, "r", encoding="utf-8") as f:
+                _video_metadata = json.load(f)
+            logger.info("Loaded video metadata with %d mappings", len(_video_metadata))
+        except Exception as e:
+            logger.warning("Error loading video metadata: %s", e)
+    return _video_metadata
 
 # ---------------------------------------------------------------------------
 # App
@@ -549,13 +566,34 @@ def _get_frame_mapping():
     return _frame_to_n
 
 
+_video_fidx_cache = {}
+
+
 @app.get("/api/keyframe/{video_id}/{frame_idx}")
 def get_keyframe(video_id: str, frame_idx: int):
-    """Trả về ảnh keyframe từ thư mục data/keyframes."""
-    candidates = []
-    
+    """Trả về ảnh keyframe (từ local hoặc redirect tới cloud R2/HF)."""
     mapping = _get_frame_mapping()
     n = mapping.get((video_id, frame_idx))
+    
+    # Nếu không có keyframe khớp chính xác (do frame_idx bị chỉnh sửa thủ công),
+    # tìm keyframe gần nhất của video này để tránh hiển thị ảnh lỗi.
+    if n is None and mapping:
+        global _video_fidx_cache
+        if video_id not in _video_fidx_cache:
+            _video_fidx_cache[video_id] = [fidx for (vid, fidx) in mapping.keys() if vid == video_id]
+        
+        v_keys = _video_fidx_cache[video_id]
+        if v_keys:
+            closest_fidx = min(v_keys, key=lambda x: abs(x - frame_idx))
+            n = mapping.get((video_id, closest_fidx))
+
+    if AIC_USE_CLOUD_MEDIA:
+        if n is not None:
+            return RedirectResponse(f"{HF_DATASET_URL}/keyframes/{video_id}/{n:03d}.jpg")
+        else:
+            return RedirectResponse(f"{HF_DATASET_URL}/keyframes/{video_id}/{frame_idx:06d}.jpg")
+
+    candidates = []
     
     if n is not None:
         candidates.extend([
@@ -708,7 +746,13 @@ def _get_video_fps_map() -> dict:
 
 @app.get("/api/video_info/{video_id}")
 def get_video_info(video_id: str):
-    """Lấy thông tin video (fps)."""
+    """Lấy thông tin video (fps) (từ local hoặc redirect tới cloud R2/HF)."""
+    if AIC_USE_CLOUD_MEDIA:
+        meta = load_video_metadata()
+        video_info = meta.get(video_id)
+        if video_info:
+            return {"fps": video_info["fps"]}
+            
     video_path = _get_video_path(video_id)
     if not video_path:
         raise HTTPException(status_code=404, detail="Video not found")
@@ -738,7 +782,23 @@ def get_video_info(video_id: str):
 
 @app.get("/api/video/{video_id}")
 def get_video(video_id: str, request: Request):
-    """Trả về video với hỗ trợ Range để tua."""
+    """Trả về video với hỗ trợ Range để tua (từ local hoặc redirect tới cloud R2/HF)."""
+    if AIC_USE_CLOUD_MEDIA:
+        meta = load_video_metadata()
+        video_info = meta.get(video_id)
+        if video_info:
+            path_in_repo = video_info["path"]
+            return RedirectResponse(f"{HF_DATASET_URL}/{path_in_repo}")
+        else:
+            # Fallback
+            prefix = video_id.split('_')[0]
+            local_path = _get_video_path(video_id)
+            if local_path:
+                for part in local_path.parts:
+                    if part.startswith("Videos_"):
+                        return RedirectResponse(f"{HF_DATASET_URL}/videos/{part}/video/{video_id}.mp4")
+            return RedirectResponse(f"{HF_DATASET_URL}/videos/Videos_{prefix}_a/video/{video_id}.mp4")
+
     video_path = _get_video_path(video_id)
     if not video_path:
         raise HTTPException(status_code=404, detail="Video not found")
