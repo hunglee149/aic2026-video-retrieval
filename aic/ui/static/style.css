@@ -431,8 +431,7 @@ input[type="range"]::-webkit-slider-thumb {
   overflow-y: auto;
   padding: 16px 20px;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  grid-auto-rows: max-content;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 14px;
   align-content: start;
 }
@@ -479,6 +478,9 @@ input[type="range"]::-webkit-slider-thumb {
   cursor: pointer;
   transition: var(--transition);
   position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: unset;
 }
 .candidate-card:hover {
   border-color: rgba(124,58,237,0.35);
@@ -496,18 +498,14 @@ input[type="range"]::-webkit-slider-thumb {
 /* Thumbnail */
 .card-thumb {
   position: relative;
+  aspect-ratio: 16/9;
   width: 100%;
-  height: 0;
-  padding-bottom: 56.25%;
   overflow: hidden;
   background: #111827;
+  flex-shrink: 0;
 }
 .card-thumb img {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
+  width: 100%; height: 100%;
   object-fit: cover;
   display: block;
   transition: transform 0.3s ease;
@@ -596,7 +594,7 @@ input[type="range"]::-webkit-slider-thumb {
   align-items: stretch;
   min-height: unset;
 }
-#candidates-grid.list-mode .card-thumb { aspect-ratio: unset; padding-bottom: 0; height: 90px; width: 160px; }
+#candidates-grid.list-mode .card-thumb { aspect-ratio: unset; height: 90px; width: 160px; }
 #candidates-grid.list-mode .card-body { padding: 10px 14px; flex: 1; }
 #candidates-grid.list-mode .verdict-row {
   flex-direction: column;

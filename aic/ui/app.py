@@ -34,7 +34,7 @@ if env_path.exists():
             _k, _v = _line.split("=", 1)
             os.environ.setdefault(_k.strip(), _v.strip().strip("'\""))
 
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse, RedirectResponse
@@ -161,62 +161,6 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="AIC 2026 Video Retrieval", version="0.1.0", lifespan=lifespan)
 
 _SUBMISSION_REPORT_PATHS = {"/api/export", "/api/query-pack/texts"}
-
-# ---------------------------------------------------------------------------
-# Shared state — đồng bộ đa người dùng qua WebSocket
-#
-# Source of truth duy nhất cho manifest + selections.
-# Chỉ hoạt động đúng với 1 worker (gunicorn workers=1).
-# Nếu cần scale multi-process: thay bằng Redis.
-# ---------------------------------------------------------------------------
-
-import asyncio
-import datetime
-import json as _json
-
-_shared_state: dict = {
-    "manifest": [],    # list[dict] — query pack hiện tại
-    "selections": [],  # list[dict] — tất cả selections của mọi người dùng
-    "version": 0,      # tăng mỗi khi có thay đổi
-    "log": [],         # list[dict] — lịch sử sync (tối đa 100 mục gần nhất)
-}
-_ws_clients: set = set()  # WebSocket connections đang mở
-_ws_lock = threading.Lock()
-_LOG_MAX = 100  # giữ tối đa 100 mục lịch sử
-
-
-def _append_log(event_type: str, summary: str) -> dict:
-    """Thêm 1 mục vào lịch sử sync, trả về entry đó."""
-    entry = {
-        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-        "type": event_type,
-        "summary": summary,
-        "version": _shared_state["version"],
-    }
-    _shared_state["log"].append(entry)
-    if len(_shared_state["log"]) > _LOG_MAX:
-        _shared_state["log"] = _shared_state["log"][-_LOG_MAX:]
-    return entry
-
-
-async def _broadcast(event_type: str, payload: dict) -> None:
-    """Gửi message tới tất cả WebSocket clients đang kết nối."""
-    if not _ws_clients:
-        return
-    msg = _json.dumps({
-        "type": event_type,
-        "payload": payload,
-        "version": _shared_state["version"],
-    })
-    dead: set = set()
-    for ws in list(_ws_clients):
-        try:
-            await ws.send_text(msg)
-        except Exception:
-            dead.add(ws)
-    if dead:
-        with _ws_lock:
-            _ws_clients.difference_update(dead)
 
 
 @app.exception_handler(RequestValidationError)
@@ -909,134 +853,6 @@ def get_video(video_id: str, request: Request):
     # Fallback dự phòng nếu không tìm thấy video_id trong metadata
     prefix = video_id.split('_')[0]
     return RedirectResponse(f"{HF_DATASET_URL}/videos/Videos_{prefix}_a/video/{video_id}.mp4")
-
-
-
-# ---------------------------------------------------------------------------
-# Real-time sync endpoints
-# ---------------------------------------------------------------------------
-
-
-class SyncManifestRequest(BaseModel):
-    manifest: list[dict]
-    reset_selections: bool = False  # True khi upload ZIP mới
-
-
-class SyncSelectionsRequest(BaseModel):
-    selections: list[dict]
-
-
-@app.websocket("/api/sync/ws")
-async def sync_websocket(ws: WebSocket):
-    """WebSocket endpoint — mỗi client kết nối vào đây để nhận broadcast."""
-    await ws.accept()
-    with _ws_lock:
-        _ws_clients.add(ws)
-    logger.info("WS client connected. Total: %d", len(_ws_clients))
-
-    # Gửi state hiện tại ngay khi kết nối
-    try:
-        await ws.send_text(_json.dumps({
-            "type": "init",
-            "payload": {
-                "manifest": _shared_state["manifest"],
-                "selections": _shared_state["selections"],
-                "log": _shared_state["log"],
-            },
-            "version": _shared_state["version"],
-        }))
-    except Exception:
-        pass
-
-    try:
-        # Giữ kết nối sống — chờ client ping hoặc disconnect
-        while True:
-            try:
-                data = await asyncio.wait_for(ws.receive_text(), timeout=30.0)
-                # Client có thể gửi "ping" để giữ kết nối
-                if data == "ping":
-                    await ws.send_text("pong")
-            except asyncio.TimeoutError:
-                # Gửi keepalive
-                try:
-                    await ws.send_text(_json.dumps({"type": "ping"}))
-                except Exception:
-                    break
-    except WebSocketDisconnect:
-        pass
-    finally:
-        with _ws_lock:
-            _ws_clients.discard(ws)
-        logger.info("WS client disconnected. Total: %d", len(_ws_clients))
-
-
-@app.get("/api/sync/state")
-def sync_get_state():
-    """Lấy shared state hiện tại (dùng khi client reconnect hoặc mới vào)."""
-    return {
-        "manifest": _shared_state["manifest"],
-        "selections": _shared_state["selections"],
-        "version": _shared_state["version"],
-        "log": _shared_state["log"],
-        "connected_clients": len(_ws_clients),
-    }
-
-
-@app.post("/api/sync/manifest")
-async def sync_manifest(req: SyncManifestRequest):
-    """Cập nhật manifest từ một user → broadcast tới tất cả.
-
-    reset_selections=True (khi upload ZIP mới): xóa toàn bộ selections cũ
-    của mọi người dùng — bắt đầu session mới hoàn toàn sạch.
-    """
-    _shared_state["manifest"] = req.manifest
-    if req.reset_selections:
-        _shared_state["selections"] = []
-        logger.info("sync_manifest: ZIP mới → reset selections cho tất cả users")
-    _shared_state["version"] += 1
-
-    n = len(req.manifest)
-    if req.reset_selections:
-        summary = f"Đã tải query pack mới ({n} queries) — đã xóa các lựa chọn cũ"
-    else:
-        summary = f"Cập nhật manifest ({n} queries)"
-    log_entry = _append_log("manifest_updated", summary)
-
-    await _broadcast("manifest_updated", {
-        "manifest": _shared_state["manifest"],
-        "selections": _shared_state["selections"],
-        "reset_selections": req.reset_selections,
-        "log_entry": log_entry,
-    })
-    return {"ok": True, "version": _shared_state["version"]}
-
-
-@app.post("/api/sync/selections")
-async def sync_selections(req: SyncSelectionsRequest):
-    """Cập nhật selections từ một user → broadcast tới tất cả.
-
-    Merge strategy: thay thế toàn bộ — client gửi lên danh sách đầy đủ
-    của mình sau khi đã merge với state local.
-    """
-    prev_count = len(_shared_state["selections"])
-    _shared_state["selections"] = req.selections
-    _shared_state["version"] += 1
-
-    new_count = len(req.selections)
-    delta = new_count - prev_count
-    if delta > 0:
-        summary = f"Đã thêm {delta} lựa chọn (tổng: {new_count})"
-    elif delta < 0:
-        summary = f"Đã xóa {-delta} lựa chọn (tổng: {new_count})"
-    else:
-        summary = f"Cập nhật lựa chọn (tổng: {new_count})"
-    log_entry = _append_log("selections_updated", summary)
-
-    await _broadcast("selections_updated", {
-        "selections": _shared_state["selections"],
-        "log_entry": log_entry,
-    })
-    return {"ok": True, "version": _shared_state["version"]}
 
 
 @app.post("/api/export")
