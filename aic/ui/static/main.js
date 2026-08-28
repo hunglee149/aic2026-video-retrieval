@@ -380,15 +380,26 @@ async function checkStatus() {
     const res = await fetch('/api/status');
     const data = await res.json();
     if (data.ok) {
-      $('status-text').textContent = data.retriever;
-      $('status-dot').style.background = 'var(--green)';
-      $('status-dot').style.boxShadow = '0 0 6px var(--green)';
-      $('stat-keyframes').textContent = data.retriever === 'dummy' ? 'demo' : '—';
+      const statusText = $('status-text');
+      const statusDot = $('status-dot');
+      if (statusText) statusText.textContent = data.retriever || 'Sẵn sàng';
+      if (statusDot) {
+        statusDot.style.background = 'var(--green, #10b981)';
+        statusDot.style.boxShadow = '0 0 8px #10b981';
+      }
+      const statKf = $('stat-keyframes');
+      if (statKf) {
+        statKf.textContent = data.ready_count > 0 ? '629k' : '—';
+      }
     }
   } catch {
-    $('status-text').textContent = 'Offline';
-    $('status-dot').style.background = 'var(--red)';
-    $('status-dot').style.boxShadow = '0 0 6px var(--red)';
+    const statusText = $('status-text');
+    const statusDot = $('status-dot');
+    if (statusText) statusText.textContent = 'Offline';
+    if (statusDot) {
+      statusDot.style.background = 'var(--red, #ef4444)';
+      statusDot.style.boxShadow = '0 0 8px #ef4444';
+    }
   }
 }
 
@@ -1619,3 +1630,14 @@ async function handleQueryFileUpload(event) {
     event.target.value = '';
   }
 }
+
+// ---------------------------------------------------------------------------
+// App Bootstrap
+// ---------------------------------------------------------------------------
+
+document.addEventListener('DOMContentLoaded', () => {
+  if (typeof loadManifest === 'function') loadManifest();
+  if (typeof renderManifestList === 'function') renderManifestList();
+  checkStatus();
+  setInterval(checkStatus, 5000);
+});
