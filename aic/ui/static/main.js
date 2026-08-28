@@ -1465,7 +1465,6 @@ function refreshPreview() {
 }
 
 async function doExport() {
-  if (!state.manifest.length) { toast('Nạp query pack trước khi export', 'warning'); return; }
   const manifestIds = new Set(state.manifest.map((item) => item.query_id));
   const rows = state.selections
     .filter((selection) => manifestIds.has(selection.queryId))
@@ -1651,8 +1650,14 @@ async function handleQueryFileUpload(event) {
     const report = response.ok ? payload : payload.detail;
     if (submissionHelpers.canInstallManifest(response.ok, report)) {
       if (zipFiles.length === 1) {
-        state.queryCache = {}; // Reset cache only when loading a completely new ZIP query pack
-        saveQueryCache();
+        // Upload ZIP mới → làm sạch toàn bộ cache cũ:
+        // queryCache (kết quả tìm kiếm), selections (lựa chọn frame), manifest cũ.
+        state.queryCache = {};
+        state.selections = [];
+        state.manifest = [];
+        localStorage.removeItem('aic_query_cache');
+        localStorage.removeItem('aic_selections');
+        localStorage.removeItem('aic_manifest');
       }
       state.manifest = report.manifest.reduce(
         (items, item) => submissionHelpers.upsertManifestItem(items, item),
