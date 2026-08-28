@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>AIC 2026 — Video Retrieval</title>
   <meta name="description" content="Hệ thống tìm kiếm sự kiện trong video cho AI Challenge HCMC 2026"/>
-  <link rel="stylesheet" href="/static/style.css"/>
+  <link rel="stylesheet" href="/static/style.css?v=11"/>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>"/>
 </head>
 <body>
@@ -24,13 +24,16 @@
     </div>
 
     <nav class="nav-tabs">
-      <button class="nav-tab active" id="tab-search" onclick="switchView('search')">🔍 Tìm kiếm</button>
-      <button class="nav-tab" id="tab-iterative" onclick="switchView('iterative')">🔄 Iterative</button>
-      <button class="nav-tab" id="tab-export" onclick="switchView('export')">📤 Export</button>
+      <button class="nav-tab active" id="tab-search" onclick="switchView('search')">Tìm kiếm</button>
+      <button class="nav-tab" id="tab-iterative" onclick="switchView('iterative')">Iterative</button>
+      <button class="nav-tab" id="tab-export" onclick="switchView('export')">Export</button>
     </nav>
 
     <div class="topbar-spacer"></div>
 
+    <button id="btn-clear-cache" onclick="clearAllCache()" style="margin-right: 12px; background: rgba(239,68,68,0.15); border: 1px solid rgba(239,68,68,0.35); color: var(--red); height: 28px; padding: 0 10px; font-size: 11px; display: inline-flex; align-items: center; gap: 4px; cursor: pointer; border-radius: var(--radius-md); font-weight: 600; transition: var(--transition);">
+      Xóa Cache
+    </button>
     <div class="status-pill" id="status-pill">
       <div class="status-dot" id="status-dot"></div>
       <span id="status-text">Đang kết nối...</span>
@@ -71,7 +74,7 @@
           <div class="translate-row">
             <label class="label" style="flex:1" for="translated-text">Bản dịch (EN)</label>
             <button class="btn-translate" onclick="doTranslate()" id="btn-translate">
-              ⟳ Dịch
+              Dịch
             </button>
           </div>
           <textarea id="translated-text" rows="3"
@@ -93,10 +96,7 @@
         </div>
 
         <div class="sidebar-section">
-          <button class="btn btn-primary" id="btn-search" onclick="doSearch()">
-            <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24">
-              <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-            </svg>
+          <button class="btn btn-primary" onclick="doSearch()" id="btn-search">
             Tìm kiếm
           </button>
         </div>
@@ -129,9 +129,6 @@
 
         <div id="candidates-grid">
           <div class="empty-state">
-            <svg width="56" height="56" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-              <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-            </svg>
             <p>Nhập câu hỏi và nhấn <strong>Tìm kiếm</strong> để xem kết quả</p>
           </div>
         </div>
@@ -150,9 +147,6 @@
           <!-- Fixed mini preview -->
           <div id="preview-img-wrap">
             <div class="preview-placeholder" id="preview-placeholder">
-              <svg width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" style="opacity:.3">
-                <polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
-              </svg>
               <span>Chọn một candidate</span>
             </div>
             <img id="preview-img" src="" alt="" style="display:none"/>
@@ -199,7 +193,7 @@
             <!-- Confirm button -->
             <div class="detail-section">
               <button class="btn btn-primary btn-sm" id="btn-confirm-selection" onclick="confirmSelection()" disabled>
-                ✓ Xác nhận lựa chọn
+                Xác nhận lựa chọn
               </button>
             </div>
 
@@ -216,8 +210,8 @@
         </div>
 
         <div class="detail-footer">
-          <button class="btn btn-green" onclick="switchView('export')">
-            📤 Xem &amp; Export
+          <button class="btn btn-green" onclick="switchView('export')" style="width:100%">
+            Xem &amp; Export
           </button>
         </div>
       </aside>
@@ -230,7 +224,7 @@
 
       <div id="iter-header">
         <div style="display:flex;align-items:center;gap:16px">
-          <span class="iter-title">🔄 Iterative Retrieval</span>
+          <span class="iter-title">Iterative Retrieval</span>
           <span class="badge badge-purple" id="iter-round-badge">Round 0/3</span>
         </div>
 
@@ -251,9 +245,6 @@
         <div id="iter-candidate-view">
           <div id="iter-preview">
             <div class="preview-placeholder" id="iter-preview-placeholder">
-              <svg width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24" style="opacity:.25">
-                <polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
-              </svg>
               <span>Nhấn "Bắt đầu" để tìm kiếm vòng lặp</span>
             </div>
             <img id="iter-preview-img" src="" alt="" style="display:none;width:100%;height:100%;object-fit:contain;background-color:#000;"/>
@@ -280,13 +271,13 @@
 
           <div class="verdict-big-row" id="iter-verdict-row">
             <button class="verdict-big-btn vb-matched" onclick="iterVerdict('matched')" id="btn-vb-matched">
-              ✓ MATCHED
+              MATCHED
             </button>
             <button class="verdict-big-btn vb-not" onclick="iterVerdict('not_matched')" id="btn-vb-not">
-              ✗ NOT MATCHED
+              NOT MATCHED
             </button>
             <button class="verdict-big-btn vb-unsure" onclick="iterVerdict('unsure')" id="btn-vb-unsure">
-              ? UNSURE
+              UNSURE
             </button>
           </div>
         </div>
@@ -295,7 +286,7 @@
         <div id="iter-results-sidebar">
           <div class="iter-results-section" style="flex:1;overflow:hidden;display:flex;flex-direction:column">
             <div class="iter-results-header">
-              <span>✅ Matched</span>
+              <span>Matched</span>
               <span class="badge badge-green" id="iter-matched-badge">0</span>
             </div>
             <div class="iter-results-body" id="iter-matched-list">
@@ -305,7 +296,7 @@
 
           <div class="iter-results-section" style="flex:1;overflow:hidden;display:flex;flex-direction:column">
             <div class="iter-results-header">
-              <span>❓ Unsure</span>
+              <span>Unsure</span>
               <span class="badge badge-amber" id="iter-unsure-badge">0</span>
             </div>
             <div class="iter-results-body" id="iter-unsure-list">
@@ -315,17 +306,17 @@
 
           <div class="iter-results-section">
             <div class="iter-results-header" style="cursor:default">
-              <span>🚫 Excluded</span>
+              <span>Excluded</span>
               <span class="badge badge-red" id="iter-excluded-badge">0</span>
             </div>
           </div>
 
           <div class="iter-actions">
             <button class="btn btn-primary" id="btn-iter-start" onclick="iterStart()">
-              ▶ Bắt đầu
+              Bắt đầu
             </button>
             <button class="btn btn-secondary" id="btn-iter-finish" onclick="iterFinish()" disabled>
-              ✓ Kết thúc &amp; Lưu kết quả
+              Kết thúc &amp; Lưu kết quả
             </button>
           </div>
         </div>
@@ -355,7 +346,6 @@
           <!-- Left: Summary -->
           <div class="export-card">
             <div class="export-card-header">
-              <span>📋</span>
               <h2>Tóm tắt kết quả</h2>
               <div class="topbar-spacer"></div>
               <span class="badge badge-gray" id="export-query-count">0 queries</span>
@@ -387,7 +377,6 @@
           <!-- Review Content Card -->
           <div class="export-card" id="export-review-card" style="display:none;">
             <div class="export-card-header">
-              <span>🖼️</span>
               <h2>Xem lại chi tiết: <span id="review-query-id" style="color:var(--purple-light)"></span></h2>
               <div class="topbar-spacer"></div>
               <span class="badge badge-purple" id="review-task-badge">KIS</span>
@@ -403,7 +392,6 @@
           <!-- Query ID config -->
           <div class="export-card">
             <div class="export-card-header">
-              <span>⚙️</span>
               <h2>Cấu hình</h2>
             </div>
             <div class="export-card-body" style="display:flex;flex-direction:column;gap:12px">
@@ -417,10 +405,9 @@
           <!-- CSV Preview -->
           <div class="export-card">
             <div class="export-card-header">
-              <span>👁️</span>
               <h2>Preview CSV</h2>
               <div class="topbar-spacer"></div>
-              <button class="btn btn-secondary btn-sm" onclick="refreshPreview()">↻ Refresh</button>
+              <button class="btn btn-secondary btn-sm" onclick="refreshPreview()">Refresh</button>
             </div>
             <div class="export-card-body">
               <pre class="code-preview" id="csv-preview">— chưa có dữ liệu —</pre>
@@ -430,12 +417,11 @@
           <!-- Download -->
           <div class="export-card">
             <div class="export-card-header">
-              <span>📦</span>
               <h2>Xuất file nộp BTC</h2>
             </div>
             <div class="export-card-body" style="display:flex;flex-direction:column;gap:12px">
               <button class="btn btn-green btn-lg" onclick="doExport()" id="btn-export">
-                📥 Tải xuống submission.zip
+                Tải xuống submission.zip
               </button>
               <div style="font-size:12px;color:var(--text-muted);text-align:center" id="export-hint">
                 Xác nhận ít nhất 1 lựa chọn trước khi export
@@ -452,7 +438,7 @@
 <!-- Toast container -->
 <div id="toast-container"></div>
 
-<script src="/static/submission_helpers.js?v=2"></script>
-<script src="/static/main.js?v=8"></script>
+<script src="/static/submission_helpers.js?v=3"></script>
+<script src="/static/main.js?v=12"></script>
 </body>
 </html>

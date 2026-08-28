@@ -1,7 +1,3 @@
-# AIC 2026 deployment image for Azure Container Apps.
-# The 116 GB media dataset stays on Hugging Face; only retrieval indexes and
-# model weights are baked into this image.
-
 FROM python:3.11-slim-bookworm
 
 ARG HF_DATASET_BASE="https://huggingface.co/datasets/manhha2502/fullhd/resolve/main"
