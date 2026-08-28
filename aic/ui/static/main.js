@@ -1632,12 +1632,62 @@ async function handleQueryFileUpload(event) {
 }
 
 // ---------------------------------------------------------------------------
+// Panel Resizer
+// ---------------------------------------------------------------------------
+
+function initResizer() {
+  const resizer = $('detail-resizer');
+  const panel = $('detail-panel');
+  if (!resizer || !panel) return;
+
+  const savedWidth = localStorage.getItem('aic_detail_panel_width');
+  if (savedWidth) {
+    const w = parseInt(savedWidth, 10);
+    if (w >= 280 && w <= 800) {
+      panel.style.width = `${w}px`;
+    }
+  }
+
+  let isDragging = false;
+  let startX = 0;
+  let startWidth = 0;
+
+  resizer.addEventListener('mousedown', (e) => {
+    isDragging = true;
+    startX = e.clientX;
+    startWidth = panel.getBoundingClientRect().width;
+    resizer.classList.add('dragging');
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!isDragging) return;
+    const delta = startX - e.clientX; // Dragging left increases width of detail panel
+    const newWidth = Math.min(Math.max(startWidth + delta, 280), 800);
+    panel.style.width = `${newWidth}px`;
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (isDragging) {
+      isDragging = false;
+      resizer.classList.remove('dragging');
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      localStorage.setItem('aic_detail_panel_width', parseInt(panel.style.width, 10));
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
 // App Bootstrap
 // ---------------------------------------------------------------------------
 
 document.addEventListener('DOMContentLoaded', () => {
   if (typeof loadManifest === 'function') loadManifest();
   if (typeof renderManifestList === 'function') renderManifestList();
+  initResizer();
   checkStatus();
   setInterval(checkStatus, 5000);
 });
+
