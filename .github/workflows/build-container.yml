@@ -3,7 +3,7 @@ name: Build and Deploy AIC
 on:
   push:
     branches:
-      - Duong/fix-ui-and-hf
+      - Ha/fix-ui-and-hf
 
 permissions:
   contents: read
