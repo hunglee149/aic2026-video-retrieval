@@ -36,8 +36,8 @@ WORKDIR /app
 RUN python -m pip install --upgrade pip setuptools wheel \
     && python -m pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
 
-COPY requirements.runtime.txt /app/requirements.runtime.txt
-RUN python -m pip install -r /app/requirements.runtime.txt
+COPY requirements.txt /app/requirements.txt
+RUN python -m pip install -r /app/requirements.txt
 
 COPY . /app
 
