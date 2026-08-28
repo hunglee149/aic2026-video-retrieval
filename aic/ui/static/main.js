@@ -235,6 +235,177 @@ function renderManifestList() {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Real-time sync (WebSocket)
+// ---------------------------------------------------------------------------
+
+let _syncWs = null;
+let _syncReconnectTimer = null;
+let _syncVersion = -1;
+
+function initSync() {
+  if (_syncReconnectTimer) { clearTimeout(_syncReconnectTimer); _syncReconnectTimer = null; }
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  _syncWs = new WebSocket(`${proto}://${location.host}/api/sync/ws`);
+
+  _syncWs.onopen = () => {
+    setSyncStatus('online');
+    // WS server sẽ tự gửi event "init" ngay sau khi kết nối
+  };
+
+  _syncWs.onmessage = (e) => {
+    let msg;
+    try { msg = JSON.parse(e.data); } catch { return; }
+    if (msg.type === 'ping') { _syncWs.send('ping'); return; }
+    if (msg.version !== undefined && msg.version <= _syncVersion) return; // bỏ qua cập nhật cũ
+    if (msg.version !== undefined) _syncVersion = msg.version;
+
+    if (msg.type === 'init') {
+      // Nhận state ban đầu khi kết nối — chỉ apply nếu server có data
+      if (msg.payload.log?.length) {
+        _syncLog = msg.payload.log.slice();
+        renderSyncLog();
+      }
+      if (msg.payload.manifest?.length) applyRemoteManifest(msg.payload, false);
+      else if (msg.payload.selections?.length) applyRemoteSelections(msg.payload);
+    } else if (msg.type === 'manifest_updated') {
+      if (msg.payload.log_entry) appendSyncLogEntry(msg.payload.log_entry);
+      applyRemoteManifest(msg.payload, true);
+    } else if (msg.type === 'selections_updated') {
+      if (msg.payload.log_entry) appendSyncLogEntry(msg.payload.log_entry);
+      applyRemoteSelections(msg.payload);
+    }
+  };
+
+  _syncWs.onclose = () => {
+    setSyncStatus('offline');
+    // Auto-reconnect sau 3 giây
+    _syncReconnectTimer = setTimeout(initSync, 3000);
+  };
+
+  _syncWs.onerror = () => {
+    setSyncStatus('offline');
+    _syncWs.close();
+  };
+}
+
+function setSyncStatus(status) {
+  const dot = $('sync-status-dot');
+  const text = $('sync-status-text');
+  if (!dot || !text) return;
+  if (status === 'online') {
+    dot.style.background = 'var(--green)';
+    dot.style.boxShadow = '0 0 5px var(--green)';
+    text.textContent = 'Synced';
+  } else {
+    dot.style.background = 'var(--red)';
+    dot.style.boxShadow = '0 0 5px var(--red)';
+    text.textContent = 'Offline';
+  }
+}
+
+function applyRemoteManifest(payload, fromPeer) {
+  const newManifest = payload.manifest || [];
+  const newSelections = payload.selections ?? null;
+  const resetSelections = payload.reset_selections === true;
+
+  if (resetSelections || newSelections !== null) {
+    state.selections = newSelections || [];
+    saveSelections();
+  }
+
+  state.manifest = newManifest;
+  saveManifest();
+  renderManifestList();
+  renderSelectionsList();
+  if ($('view-export')?.classList.contains('active')) renderExportTable();
+
+  // Nếu query hiện tại không còn trong manifest mới → chuyển sang query đầu
+  if (state.manifest.length && !state.manifest.find(q => q.query_id === state.currentQueryId)) {
+    selectManifestQuery(state.manifest[0].query_id);
+  }
+
+  if (fromPeer) {
+    const label = resetSelections ? 'Thành viên khác đã tải query pack mới (cache đã reset)' : 'Manifest đã được cập nhật';
+    toast(label, 'info');
+  }
+}
+
+function applyRemoteSelections(payload) {
+  state.selections = payload.selections || [];
+  saveSelections();
+  renderSelectionsList();
+  renderManifestList();
+  if ($('view-export')?.classList.contains('active')) renderExportTable();
+}
+
+async function pushManifestToServer(manifest, resetSelections) {
+  try {
+    await fetch('/api/sync/manifest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ manifest, reset_selections: resetSelections }),
+    });
+  } catch (e) {
+    console.warn('pushManifestToServer failed:', e);
+  }
+}
+
+async function pushSelectionsToServer() {
+  try {
+    await fetch('/api/sync/selections', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ selections: state.selections }),
+    });
+  } catch (e) {
+    console.warn('pushSelectionsToServer failed:', e);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sync activity log
+// ---------------------------------------------------------------------------
+
+let _syncLog = [];  // list of { ts, type, summary, version }
+
+function _fmtTs(isoStr) {
+  try {
+    const d = new Date(isoStr);
+    return d.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  } catch { return isoStr; }
+}
+
+function appendSyncLogEntry(entry) {
+  _syncLog.push(entry);
+  if (_syncLog.length > 100) _syncLog = _syncLog.slice(-100);
+  renderSyncLog();
+}
+
+function renderSyncLog() {
+  const container = $('sync-activity-log');
+  if (!container) return;
+
+  if (!_syncLog.length) {
+    container.innerHTML = '<div style="color:var(--text-muted);font-size:11px;text-align:center;padding:8px">Chưa có hoạt động nào</div>';
+    return;
+  }
+
+  // Hiển thị mới nhất ở trên
+  const items = [..._syncLog].reverse().slice(0, 50);
+  container.innerHTML = items.map(e => {
+    const icon = e.type === 'manifest_updated' ? '📂' : '✅';
+    const color = e.type === 'manifest_updated' ? 'var(--purple-light)' : 'var(--cyan)';
+    return `<div style="display:flex;gap:6px;align-items:flex-start;padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.05);">
+      <span style="font-size:13px;flex-shrink:0;">${icon}</span>
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:11px;color:${color};font-weight:600;line-height:1.3;">${e.summary}</div>
+        <div style="font-size:10px;color:var(--text-muted);margin-top:1px;">v${e.version} &middot; ${_fmtTs(e.ts)}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
 function clearAllCache() {
   if (!confirm('Bạn có chắc chắn muốn xóa toàn bộ cache? Tất cả câu hỏi đã tải lên, các câu trả lời đã lưu, và lịch sử tìm kiếm sẽ bị xóa sạch.')) {
     return;
@@ -944,6 +1115,7 @@ function confirmSelection() {
   saveSelections();
   renderSelectionsList();
   renderManifestList();
+  pushSelectionsToServer();
 }
 
 function removeSelection(idx) {
@@ -954,6 +1126,7 @@ function removeSelection(idx) {
   if ($('view-export').classList.contains('active')) {
     renderExportTable();
   }
+  pushSelectionsToServer();
   toast('Đã xoá lựa chọn', 'info');
 }
 
@@ -1562,6 +1735,7 @@ document.addEventListener('keydown', (e) => {
 // ---------------------------------------------------------------------------
 
 document.addEventListener('DOMContentLoaded', () => {
+  initSync();
   loadQueryCache();
   loadSelections();
   loadManifest();
@@ -1649,7 +1823,8 @@ async function handleQueryFileUpload(event) {
     const payload = await response.json();
     const report = response.ok ? payload : payload.detail;
     if (submissionHelpers.canInstallManifest(response.ok, report)) {
-      if (zipFiles.length === 1) {
+      const isZip = zipFiles.length === 1;
+      if (isZip) {
         // Upload ZIP mới → làm sạch toàn bộ cache cũ:
         // queryCache (kết quả tìm kiếm), selections (lựa chọn frame), manifest cũ.
         state.queryCache = {};
@@ -1664,6 +1839,8 @@ async function handleQueryFileUpload(event) {
         [],
       );
       saveManifest();
+      // Đồng bộ manifest (và reset selections nếu là ZIP) tới tất cả users
+      await pushManifestToServer(state.manifest, isZip);
       if (state.manifest.length) selectManifestQuery(state.manifest[0].query_id);
       else renderManifestList();
     }
