@@ -857,35 +857,103 @@ def get_video(video_id: str, request: Request):
 
 @app.post("/api/export")
 def export_submission(req: ExportRequest):
-    """Validate operator rows and return a reparsed PASS submission ZIP."""
+    """Validate operator rows and return a submission ZIP.
+
+    Trường hợp đặc biệt — trả về ZIP rỗng thay vì lỗi:
+    - manifest trống (chưa import query pack)
+    - tất cả query đều chưa có row (chưa search / chưa chọn frame)
+    Các lỗi validation khác (query_id sai format, v.v.) vẫn trả 422.
+    """
+    import io as _io
+    import zipfile as _zipfile
+
     manifest = [QueryDefinition(**query.model_dump()) for query in req.manifest]
     rows = [row.model_dump() for row in req.rows]
 
+    # --- Validate manifest structure (format, duplicate IDs, task suffix...) ---
     manifest_report = _validate_manifest(manifest)
     if not manifest_report.ok:
         raise HTTPException(status_code=422, detail=manifest_report.to_dict())
 
+    # --- Trường hợp manifest hoàn toàn trống → ZIP rỗng ---
+    if not manifest:
+        logger.info("export_submission: manifest trống, trả ZIP rỗng")
+        buf = _io.BytesIO()
+        with _zipfile.ZipFile(buf, "w", _zipfile.ZIP_DEFLATED):
+            pass  # ZIP hợp lệ, không có file bên trong
+        return Response(
+            content=buf.getvalue(),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": 'attachment; filename="submission.zip"',
+                "X-Validation-Status": "EMPTY",
+            },
+        )
+
+    # --- Thử validate + write bình thường ---
     with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
         tmp_path = tmp.name
 
     try:
         try:
             write_validated_submission(manifest, rows, tmp_path)
+            zip_bytes = Path(tmp_path).read_bytes()
+            validation_status = "PASS"
         except SubmissionValidationError as error:
-            raise HTTPException(status_code=422, detail=error.report.to_dict())
+            # Nếu lỗi CHỈ là missing_query_rows / empty_manifest
+            # (query chưa có row nào) → build ZIP với các query đã có row,
+            # bỏ qua query chưa có row, vẫn cho tải.
+            non_empty_codes = {
+                issue.code
+                for issue in error.report.errors
+                if issue.code not in ("missing_query_rows", "empty_manifest")
+            }
+            if non_empty_codes:
+                # Còn lỗi thật (video ID sai, frame sai format...) → báo lỗi bình thường
+                raise HTTPException(status_code=422, detail=error.report.to_dict())
+
+            # Chỉ có lỗi "chưa có row" → build ZIP partial với các query đã có dữ liệu
+            logger.info(
+                "export_submission: một số query chưa có row, xuất ZIP partial (%d/%d queries có dữ liệu)",
+                len([r for r in rows if r.get("query_id")]),
+                len(manifest),
+            )
+            buf = _io.BytesIO()
+            with _zipfile.ZipFile(buf, "w", _zipfile.ZIP_DEFLATED) as zf:
+                from ..submission.validator import normalize_submission_rows
+                normalized = normalize_submission_rows(rows)
+                rows_by_query: dict[str, list] = {q.query_id: [] for q in manifest}
+                for row in normalized:
+                    qid = row.get("query_id")
+                    if qid in rows_by_query:
+                        csv_row = [row["video_id"], *[str(f) for f in row["frames"]]]
+                        if next(q for q in manifest if q.query_id == qid).task == "qa":
+                            csv_row.append(row.get("answer", ""))
+                        rows_by_query[qid].append(csv_row)
+                import csv as _csv
+                for query in manifest:
+                    qrows = rows_by_query[query.query_id]
+                    if not qrows:
+                        continue  # bỏ qua query chưa có row
+                    csv_buf = _io.StringIO(newline="")
+                    _csv.writer(csv_buf).writerows(qrows)
+                    zf.writestr(
+                        f"submission/{query.query_id}.csv",
+                        csv_buf.getvalue().encode("utf-8"),
+                    )
+            zip_bytes = buf.getvalue()
+            validation_status = "PARTIAL"
         except GeneratedArchiveError as error:
             raise HTTPException(status_code=500, detail=error.report.to_dict())
-        zip_bytes = Path(tmp_path).read_bytes()
     finally:
         Path(tmp_path).unlink(missing_ok=True)
 
-    filename = "submission.zip"
     return Response(
         content=zip_bytes,
         media_type="application/zip",
         headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
-            "X-Validation-Status": "PASS",
+            "Content-Disposition": 'attachment; filename="submission.zip"',
+            "X-Validation-Status": validation_status,
         },
     )
 
