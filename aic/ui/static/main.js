@@ -32,6 +32,22 @@ const state = {
   iterExcluded: new Set(),
 
   queryCache: {},
+
+  // Private search tab state
+  privateTask: 'kis',
+  privateCandidates: [],
+  privateSelected: null,
+  privateSelections: [],
+  privateQueryCache: {},
+  privateCandidateDraftFrames: {},
+  currentPrivateQueryId: null,
+  privateCurrentPlaybackFrame: null,
+  privateCurrentFps: null,
+
+  // Manual entry tab state
+  videos: [],
+  manualCurrentFps: null,
+  manualCurrentPlaybackFrame: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -132,6 +148,7 @@ function currentTrakeEvents() {
 
 function saveManifest() {
   localStorage.setItem('aic_manifest', JSON.stringify(state.manifest));
+  sendWsUpdate();
 }
 
 function loadManifest() {
@@ -242,7 +259,46 @@ function clearAllCache() {
   localStorage.removeItem('aic_selections');
   localStorage.removeItem('aic_manifest');
   localStorage.removeItem('aic_query_cache');
-  window.location.reload();
+  localStorage.removeItem('aic_private_selections');
+  localStorage.removeItem('aic_private_query_cache');
+
+  // Clear state
+  state.manifest = [];
+  state.selections = [];
+  state.queryCache = {};
+  state.currentQueryId = null;
+  state.selected = null;
+  state.candidates = [];
+  
+  state.privateSelections = [];
+  state.privateQueryCache = {};
+  state.currentPrivateQueryId = null;
+  state.privateSelected = null;
+  state.privateCandidates = [];
+
+  // Update server and sync
+  sendWsUpdate();
+
+  // Re-render UI views
+  renderManifestList();
+  renderSelectionsList();
+  renderExportTable();
+  clearQueryWorkspace();
+
+  renderPrivateManifestList();
+  renderPrivateSelectionsList();
+  clearPrivateQueryWorkspace();
+
+  // Reset inputs
+  const qi = $('query-input'); if (qi) qi.value = '';
+  const tt = $('translated-text'); if (tt) tt.value = '';
+  const qii = $('query-id-input'); if (qii) qii.value = '';
+
+  const pqi = $('private-query-input'); if (pqi) pqi.value = '';
+  const ptt = $('private-translated-text'); if (ptt) ptt.value = '';
+  const pqii = $('private-query-id-input'); if (pqii) pqii.value = '';
+
+  toast('Đã xóa sạch cache hệ thống và đồng bộ!', 'success');
 }
 
 function saveQueryCache() {
@@ -258,6 +314,7 @@ function saveQueryCache() {
   } catch (e) {
     console.error('Failed to write local storage:', e);
   }
+  sendWsUpdate();
 }
 
 function loadQueryCache() {
@@ -456,6 +513,14 @@ function switchView(view) {
   const tab = $(`tab-${view}`);
   if (tab) tab.classList.add('active');
   if (view === 'export') renderExportTable();
+  if (view === 'private-search') {
+    renderPrivateManifestList();
+    renderPrivateSelectionsList();
+  }
+  if (view === 'manual-entry') {
+    populateManualQuerySelect();
+    renderManualSelections();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -527,6 +592,27 @@ async function doSearch() {
   const query_id = currentQueryId();
   const k = parseInt($('topk-slider').value, 10);
   const n_events = currentTrakeEvents() || 1;
+
+  const isManual = !state.manifest.some((item) => item.query_id === query_id);
+  if (isManual) {
+    state.queryCache = {};
+    state.selections = [];
+    state.manifest = [{
+      query_id: query_id,
+      task: state.task,
+      text: text_vi,
+      source_name: `${query_id}.txt`,
+      n_events: n_events,
+      events_confirmed: true
+    }];
+    saveQueryCache();
+    saveSelections();
+    saveManifest();
+    renderManifestList();
+    renderSelectionsList();
+    renderExportTable();
+    state.currentQueryId = query_id;
+  }
 
   setLoading('btn-search', true);
   $('candidates-grid').innerHTML = '<div class="spinner"><div class="spinner-ring"></div></div>';
@@ -635,6 +721,7 @@ function setVerdict(idx, verdict, e) {
 
 function saveSelections() {
   localStorage.setItem('aic_selections', JSON.stringify(state.selections));
+  sendWsUpdate();
 }
 
 function loadSelections() {
@@ -1465,8 +1552,30 @@ function refreshPreview() {
 }
 
 async function doExport() {
-  if (!state.manifest.length) { toast('Nạp query pack trước khi export', 'warning'); return; }
-  const manifestIds = new Set(state.manifest.map((item) => item.query_id));
+  let exportManifest = state.manifest;
+  if (!exportManifest || exportManifest.length === 0) {
+    const queryIds = [...new Set(state.selections.map(s => s.queryId))];
+    exportManifest = queryIds.map(qid => {
+      const firstSel = state.selections.find(s => s.queryId === qid);
+      const task = firstSel ? firstSel.task : 'kis';
+      const n_events = firstSel && firstSel.frames ? firstSel.frames.length : 1;
+      return {
+        query_id: qid,
+        task: task,
+        text: qid,
+        source_name: `${qid}.txt`,
+        n_events: n_events,
+        events_confirmed: true
+      };
+    });
+  }
+
+  if (exportManifest.length === 0) {
+    toast('Không có câu hỏi hay lựa chọn nào để xuất!', 'warning');
+    return;
+  }
+
+  const manifestIds = new Set(exportManifest.map((item) => item.query_id));
   const rows = state.selections
     .filter((selection) => manifestIds.has(selection.queryId))
     .map((selection) => ({
@@ -1481,7 +1590,7 @@ async function doExport() {
     const res = await fetch('/api/export', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ manifest: state.manifest, rows }),
+      body: JSON.stringify({ manifest: exportManifest, rows }),
     });
     if (!res.ok) {
       const payload = await res.json();
@@ -1566,6 +1675,9 @@ document.addEventListener('DOMContentLoaded', () => {
   loadQueryCache();
   loadSelections();
   loadManifest();
+  loadPrivateQueryCache();
+  loadPrivateSelections();
+  connectWs();
   checkStatus();
   setInterval(checkStatus, 30000);
   if (state.manifest.length) selectManifestQuery(state.manifest[0].query_id);
@@ -1607,8 +1719,71 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  // Event listeners for Private Search Tab
+  $('private-query-id-input').addEventListener('input', () => {
+    clearPrivateQueryWorkspace();
+    state.currentPrivateQueryId = null;
+    renderPrivateManifestList();
+    renderPrivateSelectionsList();
+  });
+  
+  $('private-n-events-input').addEventListener('change', () => {
+    if (currentPrivateManifestItem()?.task !== 'trake') return;
+    updateSelectedPrivateTrakeState(false);
+    if (state.privateSelected !== null) selectPrivateCandidate(state.privateSelected);
+  });
+  
+  $('private-trake-events-confirmed').addEventListener('change', (event) => {
+    updateSelectedPrivateTrakeState(event.target.checked);
+  });
+
+  const privateFrameInput = $('private-frame-input');
+  if (privateFrameInput) {
+    privateFrameInput.addEventListener('input', (e) => {
+      const frame = parseInt(e.target.value, 10);
+      if (!isNaN(frame) && state.privateSelected !== null) {
+        const candidate = state.privateCandidates[state.privateSelected];
+        if (candidate) state.privateCandidateDraftFrames[candidateKey(candidate)] = frame;
+      }
+      const privateVid = $('private-preview-vid');
+      if (!isNaN(frame) && privateVid && privateVid.style.display !== 'none') {
+        const fps = state.privateCurrentFps || 25;
+        privateVid.currentTime = Math.max(0, frame - 1) / fps;
+      }
+    });
+  }
+  
+  const privateVid = $('private-preview-vid');
+  if (privateVid) {
+    privateVid.addEventListener('timeupdate', updatePrivatePlaybackFrame);
+    privateVid.addEventListener('seeked', updatePrivatePlaybackFrame);
+  }
+
+  // Initialize videos list
+  fetchVideosList();
+
+  // Event listeners for Manual Entry Tab
+  const manualFrameInput = $('manual-frame-input');
+  if (manualFrameInput) {
+    manualFrameInput.addEventListener('input', (e) => {
+      const frame = parseInt(e.target.value, 10);
+      const vid = $('manual-preview-vid');
+      if (!isNaN(frame) && vid && vid.style.display !== 'none') {
+        const fps = state.manualCurrentFps || 25;
+        vid.currentTime = Math.max(0, frame - 1) / fps;
+      }
+    });
+  }
+  
+  const manualVid = $('manual-preview-vid');
+  if (manualVid) {
+    manualVid.addEventListener('timeupdate', updateManualPlaybackFrame);
+    manualVid.addEventListener('seeked', updateManualPlaybackFrame);
+  }
+
   window.addEventListener('beforeunload', () => {
     saveCurrentQueryToCache();
+    saveCurrentPrivateQueryToCache();
   });
 });
 
@@ -1650,10 +1825,13 @@ async function handleQueryFileUpload(event) {
     const payload = await response.json();
     const report = response.ok ? payload : payload.detail;
     if (submissionHelpers.canInstallManifest(response.ok, report)) {
-      if (zipFiles.length === 1) {
-        state.queryCache = {}; // Reset cache only when loading a completely new ZIP query pack
-        saveQueryCache();
-      }
+      state.queryCache = {};
+      state.selections = [];
+      state.manifest = [];
+      saveQueryCache();
+      saveSelections();
+      saveManifest();
+
       state.manifest = report.manifest.reduce(
         (items, item) => submissionHelpers.upsertManifestItem(items, item),
         [],
@@ -1672,3 +1850,1318 @@ async function handleQueryFileUpload(event) {
     event.target.value = '';
   }
 }
+
+// WebSocket Collaboration
+let ws;
+let isApplyingWsUpdate = false;
+
+function connectWs() {
+  const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${window.location.host}/api/ws`);
+
+  ws.onopen = () => {
+    console.log('WebSocket connected');
+    const statusText = $('status-text');
+    if (statusText) {
+      statusText.textContent = 'Online (Đồng bộ)';
+    }
+    const statusDot = $('status-dot');
+    if (statusDot) {
+      statusDot.style.background = 'var(--green)';
+      statusDot.style.boxShadow = '0 0 6px var(--green)';
+    }
+  };
+
+  ws.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data);
+      if (msg.type === 'init' || msg.type === 'update') {
+        if (msg.type === 'init' && (!msg.manifest || msg.manifest.length === 0) && state.manifest && state.manifest.length > 0) {
+          sendWsUpdate();
+          return;
+        }
+
+        isApplyingWsUpdate = true;
+        try {
+          state.manifest = msg.manifest || [];
+          state.selections = msg.selections || [];
+          
+          const deserialized = {};
+          if (msg.queryCache) {
+            for (const [qid, cache] of Object.entries(msg.queryCache)) {
+              if (!cache) continue;
+              deserialized[qid] = Object.assign({}, cache, {
+                iterExcluded: new Set(cache.iterExcluded || []),
+              });
+            }
+          }
+          state.queryCache = deserialized;
+
+          saveManifest();
+          saveSelections();
+          saveQueryCache();
+
+          renderManifestList();
+          renderSelectionsList();
+          renderExportTable();
+
+          if (state.currentQueryId) {
+            const item = currentManifestItem();
+            const form = item ? submissionHelpers.manifestQueryFormState(item) : null;
+            loadQueryFromCache(state.currentQueryId, form);
+          } else {
+            renderCandidates();
+          }
+        } finally {
+          isApplyingWsUpdate = false;
+        }
+      }
+    } catch (e) {
+      console.error('Error handling WebSocket message:', e);
+    }
+  };
+
+  ws.onclose = () => {
+    console.log('WebSocket disconnected, reconnecting in 2s...');
+    const statusText = $('status-text');
+    if (statusText) {
+      statusText.textContent = 'Mất kết nối';
+    }
+    const statusDot = $('status-dot');
+    if (statusDot) {
+      statusDot.style.background = 'var(--red)';
+      statusDot.style.boxShadow = '0 0 6px var(--red)';
+    }
+    setTimeout(connectWs, 2000);
+  };
+}
+
+function sendWsUpdate() {
+  if (isApplyingWsUpdate) return;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    const serializedCache = {};
+    for (const [qid, cache] of Object.entries(state.queryCache)) {
+      if (!cache) continue;
+      serializedCache[qid] = Object.assign({}, cache, {
+        iterExcluded: Array.from(cache.iterExcluded || []),
+      });
+    }
+
+    ws.send(JSON.stringify({
+      type: 'update',
+      manifest: state.manifest,
+      selections: state.selections,
+      queryCache: serializedCache
+    }));
+  }
+}
+
+// ===========================================================================
+// TÌM KIẾM RIÊNG (PRIVATE SEARCH)
+// ===========================================================================
+
+function selectPrivateTask(task) {
+  state.privateTask = task;
+  document.querySelectorAll('#private-sidebar .task-pill').forEach((el) => {
+    el.classList.toggle('active', el.id === `private-pill-${task}`);
+  });
+  
+  const eventsSection = $('private-n-events-section');
+  if (eventsSection) {
+    eventsSection.style.display = task === 'trake' ? 'flex' : 'none';
+  }
+  
+  const answerSection = $('private-answer-section');
+  if (answerSection) {
+    answerSection.style.display = task === 'qa' ? 'block' : 'none';
+  }
+  
+  if (state.privateSelected !== null) {
+    selectPrivateCandidate(state.privateSelected);
+  }
+}
+
+async function doPrivateTranslate() {
+  const text_vi = $('private-query-input').value.trim();
+  if (!text_vi) return;
+  setLoading('private-btn-translate', true);
+  try {
+    const res = await fetch('/api/translate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text_vi }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      $('private-translated-text').value = data.text_en;
+    }
+  } catch (e) {
+    toast('Dịch thất bại: ' + e.message, 'error');
+  } finally {
+    setLoading('private-btn-translate', false);
+  }
+}
+
+function currentPrivateQueryId() {
+  return state.currentPrivateQueryId || $('private-query-id-input').value.trim() || 'q1';
+}
+
+function currentPrivateManifestItem() {
+  return state.manifest.find((item) => item.query_id === state.currentPrivateQueryId) || null;
+}
+
+function currentPrivateTrakeEvents() {
+  const item = currentPrivateManifestItem();
+  return item && item.task === 'trake' ? item.n_events : parseInt($('private-n-events-input').value, 10);
+}
+
+function updateSelectedPrivateTrakeState(confirmEvents) {
+  const item = currentPrivateManifestItem();
+  if (!item || item.task !== 'trake') return;
+  const nEvents = parseInt($('private-n-events-input').value, 10);
+  if (!Number.isInteger(nEvents) || nEvents < 1) {
+    state.manifest = submissionHelpers.updateTrakeState(
+      state.manifest,
+      item.query_id,
+      item.n_events,
+      false,
+    );
+    $('private-trake-events-confirmed').checked = false;
+    saveManifest();
+    renderPrivateManifestList();
+    toast('Số events TRAKE phải lớn hơn 0', 'warning');
+    return;
+  }
+  state.manifest = confirmEvents
+    ? submissionHelpers.updateTrakeState(state.manifest, item.query_id, nEvents, true)
+    : submissionHelpers.changeTrakeEventCount(state.manifest, item.query_id, nEvents);
+  $('private-trake-events-confirmed').checked = Boolean(confirmEvents);
+  saveManifest();
+  renderPrivateManifestList();
+}
+
+function selectPrivateManifestQuery(queryId) {
+  saveCurrentPrivateQueryToCache();
+  
+  const item = state.manifest.find((item) => item.query_id === queryId);
+  if (!item) return;
+  
+  clearPrivateQueryWorkspace();
+  state.privateSelected = null;
+  state.privateCandidates = [];
+  
+  const form = submissionHelpers.manifestQueryFormState(item);
+  state.currentPrivateQueryId = form.queryId;
+  $('private-query-id-input').value = form.queryId;
+  $('private-query-input').value = form.text;
+  $('private-n-events-input').value = form.nEvents;
+  $('private-trake-events-confirmed').checked = form.eventsConfirmed;
+  selectPrivateTask(form.task);
+  
+  loadPrivateQueryFromCache(form.queryId, form);
+  
+  renderPrivateManifestList();
+  renderPrivateSelectionsList();
+}
+
+async function doPrivateSearch() {
+  const text_vi = $('private-query-input').value.trim();
+  if (!text_vi) { toast('Nhập câu hỏi', 'warning'); return; }
+  const text_en = $('private-translated-text').value.trim();
+  const query_id = currentPrivateQueryId();
+  const k = parseInt($('private-topk-slider').value, 10);
+  const n_events = currentPrivateTrakeEvents() || 1;
+
+  setLoading('private-btn-search', true);
+  $('private-candidates-grid').innerHTML = '<div class="spinner"><div class="spinner-ring"></div></div>';
+
+  try {
+    const res = await fetch('/api/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query_id, text_vi, text_en, task: state.privateTask, n_events, k }),
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.detail || 'Search failed');
+
+    state.privateCandidates = data.candidates;
+    state.privateSelected = null;
+    renderPrivateCandidates();
+    $('private-results-count').textContent = `${data.total} candidates`;
+    toast(`Tìm được ${data.total} kết quả (Riêng)`, 'success');
+  } catch (e) {
+    $('private-candidates-grid').innerHTML = `<div class="empty-state"><p style="color:var(--red)">❌ ${e.message}</p></div>`;
+    toast(e.message, 'error');
+  } finally {
+    setLoading('private-btn-search', false);
+  }
+}
+
+function renderPrivateCandidates() {
+  const grid = $('private-candidates-grid');
+  if (!grid) return;
+  if (!state.privateCandidates.length) {
+    grid.innerHTML = '<div class="empty-state"><p>Không có kết quả</p></div>';
+    return;
+  }
+
+  grid.innerHTML = '';
+  state.privateCandidates.forEach((c, idx) => {
+    const frameIdx = c.representative_frames[0] ?? c.start_frame;
+    const card = document.createElement('div');
+    card.className = 'candidate-card';
+    card.dataset.idx = idx;
+
+    const scoreCls = scoreClass(c.best_score);
+    card.innerHTML = `
+      <div class="card-thumb">
+        <img src="${keyframeUrl(c.video_id, frameIdx)}" alt="${c.video_id}" loading="lazy"/>
+        <div class="card-rank">#${c.rank}</div>
+        <div class="card-score ${scoreCls}">${fmtScore(c.best_score)}</div>
+      </div>
+      <div class="card-body">
+        <div class="card-video-id">${c.video_id}</div>
+      </div>`;
+
+    card.addEventListener('click', (e) => {
+      let forceOriginal = false;
+      if (state.privateSelected === idx) {
+        const c = state.privateCandidates[idx];
+        if (c) {
+          delete state.privateCandidateDraftFrames[candidateKey(c)];
+          forceOriginal = true;
+        }
+      }
+      selectPrivateCandidate(idx, forceOriginal);
+    });
+    grid.appendChild(card);
+  });
+}
+
+function selectPrivateCandidate(idx, forceOriginal = false) {
+  if (state.privateSelected !== idx) {
+    state.privateCandidateDraftFrames = {};
+  }
+  state.privateSelected = idx;
+  const c = state.privateCandidates[idx];
+  if (!c) {
+    state.privateSelected = null;
+    $('private-btn-confirm-selection').disabled = true;
+    $('private-btn-confirm-shared').disabled = true;
+    return;
+  }
+  document.querySelectorAll('#private-candidates-grid .candidate-card').forEach((el, i) => {
+    el.classList.toggle('selected', i === idx);
+  });
+
+  const frameIdx = submissionHelpers.candidateToSubmissionFrame(c);
+  const img = $('private-preview-img');
+  const vid = $('private-preview-vid');
+  const placeholder = $('private-preview-placeholder');
+  state.privateCurrentFps = null;
+  
+  img.style.display = 'none';
+  if (vid) vid.style.display = 'none';
+  placeholder.style.display = 'flex';
+  
+  const queryId = currentPrivateQueryId();
+  const draftFrame = state.privateCandidateDraftFrames[candidateKey(c)];
+  const existing = state.privateSelections.find(s => s.queryId === queryId && s.video_id === c.video_id);
+  
+  let initialFrame = frameIdx;
+  if (!forceOriginal) {
+    if (Number.isInteger(draftFrame)) {
+      initialFrame = draftFrame;
+    } else if (existing && Number.isInteger(existing.frame)) {
+      initialFrame = existing.frame;
+    }
+  }
+  
+  state.privateCurrentPlaybackFrame = initialFrame;
+  const playbackFrame = $('private-video-current-frame');
+  if (playbackFrame) playbackFrame.textContent = String(initialFrame);
+  
+  if (vid) {
+    const targetSrc = `/api/video/${c.video_id}`;
+    const currentPath = vid.src ? new URL(vid.src, window.location.href).pathname : '';
+    const targetPath = new URL(targetSrc, window.location.href).pathname;
+
+    if (currentPath === targetPath && vid.readyState >= 1) {
+      img.style.display = 'none';
+      placeholder.style.display = 'none';
+      vid.style.display = 'block';
+      fetch(`/api/video_info/${c.video_id}`)
+        .then(res => res.json())
+        .then(data => {
+          state.privateCurrentFps = data.fps;
+          vid.currentTime = Math.max(0, initialFrame - 1) / data.fps;
+        })
+        .catch(() => {
+          state.privateCurrentFps = 25;
+          vid.currentTime = Math.max(0, initialFrame - 1) / 25;
+        });
+    } else {
+      vid.removeAttribute('src');
+      vid.load();
+      fetch(`/api/video_info/${c.video_id}`)
+        .then(res => res.json())
+        .then(data => {
+          state.privateCurrentFps = data.fps;
+          vid.src = targetSrc;
+          vid.load();
+          vid.onloadeddata = () => {
+            img.style.display = 'none';
+            placeholder.style.display = 'none';
+            vid.style.display = 'block';
+            vid.currentTime = Math.max(0, initialFrame - 1) / data.fps;
+            vid.onloadeddata = null;
+          };
+          vid.onerror = () => {
+            vid.removeAttribute('src');
+            vid.style.display = 'none';
+            placeholder.style.display = 'none';
+            img.src = keyframeUrl(c.video_id, frameIdx);
+            img.style.display = 'block';
+            img.onerror = () => {
+              img.removeAttribute('src');
+              img.style.display = 'none';
+              placeholder.style.display = 'flex';
+            };
+          };
+        })
+        .catch(() => {
+          state.privateCurrentFps = 25;
+          vid.src = targetSrc;
+          vid.load();
+          vid.onloadeddata = () => {
+            img.style.display = 'none';
+            placeholder.style.display = 'none';
+            vid.style.display = 'block';
+            vid.currentTime = Math.max(0, initialFrame - 1) / 25;
+            vid.onloadeddata = null;
+          };
+          vid.onerror = () => {
+            vid.removeAttribute('src');
+            vid.style.display = 'none';
+            placeholder.style.display = 'none';
+            img.src = keyframeUrl(c.video_id, frameIdx);
+            img.style.display = 'block';
+            img.onerror = () => {
+              img.removeAttribute('src');
+              img.style.display = 'none';
+              placeholder.style.display = 'flex';
+            };
+          };
+        });
+    }
+  } else {
+    img.src = keyframeUrl(c.video_id, frameIdx);
+    img.onload = () => {
+      placeholder.style.display = 'none';
+      img.style.display = 'block';
+    };
+    img.onerror = () => {
+      img.removeAttribute('src');
+      img.style.display = 'none';
+      placeholder.style.display = 'flex';
+    };
+  }
+
+  const scoresSection = $('private-detail-scores-section');
+  const scoresBody = $('private-detail-scores-body');
+  if (scoresSection && scoresBody) {
+    scoresBody.innerHTML = '';
+    const scores = c.scores || {};
+    const keys = Object.keys(scores);
+    if (keys.length) {
+      keys.forEach((key) => {
+        const row = document.createElement('div');
+        row.className = 'score-row';
+        row.innerHTML = `<span class="score-key">${key}</span><span class="score-val">${fmtScore(scores[key])}</span>`;
+        scoresBody.appendChild(row);
+      });
+      scoresSection.style.display = 'block';
+    } else {
+      scoresSection.style.display = 'none';
+    }
+  }
+
+  const evidenceSection = $('private-detail-evidence-section');
+  const evidenceText = $('private-detail-evidence-text');
+  if (evidenceSection && evidenceText) {
+    const text = c.evidence?.caption || c.evidence?.text || '';
+    if (text) {
+      evidenceText.textContent = text;
+      evidenceSection.style.display = 'block';
+    } else {
+      evidenceSection.style.display = 'none';
+    }
+  }
+
+  const frameInput = $('private-frame-input');
+  if (frameInput) {
+    frameInput.value = initialFrame;
+  }
+  
+  const rankBadge = $('private-detail-rank-badge');
+  if (rankBadge) {
+    rankBadge.textContent = c.rank ? `#${c.rank}` : '—';
+  }
+  
+  const videoIdLabel = $('private-detail-video-id');
+  if (videoIdLabel) {
+    videoIdLabel.textContent = c.video_id;
+  }
+
+  const task = state.privateTask;
+  const nEvents = currentPrivateTrakeEvents() || 1;
+  const trakeContainer = $('private-frame-picker-trake-container');
+  const singleRow = $('private-frame-picker-single-row');
+
+  if (task === 'trake') {
+    if (singleRow) singleRow.style.display = 'none';
+    if (trakeContainer) {
+      trakeContainer.replaceChildren();
+      trakeContainer.style.display = 'flex';
+      
+      const saved = state.privateSelections.find(s => s.queryId === queryId && s.video_id === c.video_id);
+      const savedFrames = saved && saved.frames ? saved.frames : [];
+      
+      for (let i = 1; i <= nEvents; i++) {
+        const row = document.createElement('div');
+        row.className = 'frame-picker-row';
+        row.style.alignItems = 'center';
+        
+        const label = document.createElement('span');
+        label.className = 'label';
+        label.style.width = '60px';
+        label.textContent = `Event ${i}:`;
+        
+        const input = document.createElement('input');
+        input.type = 'number';
+        input.className = 'private-trake-frame-input';
+        input.dataset.eventIdx = i - 1;
+        input.min = '1';
+        
+        let draftVal = state.privateCandidateDraftFrames[`${candidateKey(c)}__e${i-1}`];
+        if (Number.isInteger(draftVal)) {
+          input.value = draftVal;
+        } else if (Number.isInteger(savedFrames[i-1])) {
+          input.value = savedFrames[i-1];
+        } else if (i === 1) {
+          input.value = initialFrame;
+          state.privateCandidateDraftFrames[`${candidateKey(c)}__e0`] = initialFrame;
+        }
+        
+        input.addEventListener('input', (e) => {
+          const val = parseInt(e.target.value, 10);
+          if (!isNaN(val)) {
+            state.privateCandidateDraftFrames[`${candidateKey(c)}__e${i-1}`] = val;
+          }
+        });
+        
+        const grabBtn = document.createElement('button');
+        grabBtn.type = 'button';
+        grabBtn.className = 'btn btn-secondary btn-sm';
+        grabBtn.textContent = 'Grab';
+        grabBtn.addEventListener('click', (e) => {
+          e.preventDefault();
+          const currentFrame = currentPrivateVideoFrame() ?? state.privateCurrentPlaybackFrame;
+          if (Number.isInteger(currentFrame)) {
+            input.value = currentFrame;
+            state.privateCandidateDraftFrames[`${candidateKey(c)}__e${i-1}`] = currentFrame;
+          }
+        });
+        
+        row.append(label, input, grabBtn);
+        trakeContainer.appendChild(row);
+      }
+    }
+  } else {
+    if (trakeContainer) {
+      trakeContainer.replaceChildren();
+      trakeContainer.style.display = 'none';
+    }
+    if (singleRow) singleRow.style.display = 'flex';
+  }
+
+  const answerInput = $('private-answer-input');
+  if (answerInput) {
+    if (task === 'qa') {
+      const saved = state.privateSelections.find(s => s.queryId === queryId && s.video_id === c.video_id);
+      answerInput.value = saved && saved.answer ? saved.answer : '';
+    } else {
+      answerInput.value = '';
+    }
+  }
+
+  $('private-btn-confirm-selection').disabled = false;
+  $('private-btn-confirm-shared').disabled = false;
+}
+
+function grabPrivateCurrentFrame(e) {
+  if (e) e.preventDefault();
+  if (state.privateSelected === null) return;
+  const candidate = state.privateCandidates[state.privateSelected];
+  if (!candidate) return;
+  const frame = currentPrivateVideoFrame()
+    ?? state.privateCurrentPlaybackFrame
+    ?? submissionHelpers.candidateToSubmissionFrame(candidate);
+  if (!Number.isInteger(frame)) return;
+  $('private-frame-input').value = frame;
+  state.privateCandidateDraftFrames[candidateKey(candidate)] = frame;
+  const button = $('private-btn-grab-frame');
+  if (button) {
+    button.classList.add('captured');
+    setTimeout(() => button.classList.remove('captured'), 700);
+  }
+}
+
+function confirmPrivateSelection() {
+  if (state.privateSelected === null) return;
+  const c = state.privateCandidates[state.privateSelected];
+  if (!c) return;
+  const queryId = currentPrivateQueryId();
+  const task = state.privateTask;
+  
+  let frame = parseInt($('private-frame-input')?.value || '0', 10);
+  let frames = [frame];
+  let answer = '';
+  
+  if (task === 'trake') {
+    const inputs = document.querySelectorAll('.private-trake-frame-input');
+    frames = Array.from(inputs).map(inp => parseInt(inp.value, 10));
+    if (frames.some(isNaN)) {
+      toast('Tất cả event frames của TRAKE phải hợp lệ', 'warning');
+      return;
+    }
+  } else {
+    if (isNaN(frame) || frame < 1) {
+      toast('Frame không hợp lệ', 'warning');
+      return;
+    }
+    if (task === 'qa') {
+      answer = $('private-answer-input')?.value.trim() || '';
+      if (!answer) {
+        toast('Q&A cần câu trả lời', 'warning');
+        return;
+      }
+    }
+  }
+  
+  state.privateSelections = state.privateSelections.filter(s => !(s.queryId === queryId && s.video_id === c.video_id));
+  state.privateSelections.push({
+    queryId,
+    video_id: c.video_id,
+    frames,
+    answer,
+    task,
+    rank: c.rank || 1
+  });
+  
+  savePrivateSelections();
+  renderPrivateSelectionsList();
+  renderPrivateManifestList();
+  toast('Đã xác nhận lựa chọn riêng', 'success');
+}
+
+function confirmPrivateToShared() {
+  if (state.privateSelected === null) return;
+  const c = state.privateCandidates[state.privateSelected];
+  if (!c) return;
+  const queryId = currentPrivateQueryId();
+  const task = state.privateTask;
+  
+  let frame = parseInt($('private-frame-input')?.value || '0', 10);
+  let frames = [frame];
+  let answer = '';
+  
+  if (task === 'trake') {
+    const inputs = document.querySelectorAll('.private-trake-frame-input');
+    frames = Array.from(inputs).map(inp => parseInt(inp.value, 10));
+    if (frames.some(isNaN)) {
+      toast('Tất cả event frames của TRAKE phải hợp lệ', 'warning');
+      return;
+    }
+  } else {
+    if (isNaN(frame) || frame < 1) {
+      toast('Frame không hợp lệ', 'warning');
+      return;
+    }
+    if (task === 'qa') {
+      answer = $('private-answer-input')?.value.trim() || '';
+      if (!answer) {
+        toast('Q&A cần câu trả lời', 'warning');
+        return;
+      }
+    }
+  }
+  
+  // Save to shared selections (will automatically call saveSelections() and sendWsUpdate())
+  state.selections = state.selections.filter(s => !(s.queryId === queryId && s.video_id === c.video_id));
+  state.selections.push({
+    queryId,
+    video_id: c.video_id,
+    frames,
+    answer,
+    task,
+    rank: c.rank || 1
+  });
+  
+  saveSelections();
+  renderSelectionsList();
+  renderManifestList();
+  renderExportTable();
+  toast('Đã xác nhận lựa chọn lên không gian chung', 'success');
+}
+
+function savePrivateSelections() {
+  localStorage.setItem('aic_private_selections', JSON.stringify(state.privateSelections));
+}
+
+function loadPrivateSelections() {
+  const data = localStorage.getItem('aic_private_selections');
+  if (data) {
+    try {
+      state.privateSelections = JSON.parse(data);
+    } catch (e) {
+      console.error('Failed to load private selections:', e);
+      state.privateSelections = [];
+    }
+  }
+}
+
+function savePrivateQueryCache() {
+  const serialized = {};
+  for (const [qid, cache] of Object.entries(state.privateQueryCache)) {
+    if (!cache) continue;
+    serialized[qid] = Object.assign({}, cache, {
+      iterExcluded: Array.from(cache.iterExcluded || []),
+    });
+  }
+  try {
+    localStorage.setItem('aic_private_query_cache', JSON.stringify(serialized));
+  } catch (e) {
+    console.error('Failed to write private cache:', e);
+  }
+}
+
+function loadPrivateQueryCache() {
+  const data = localStorage.getItem('aic_private_query_cache');
+  if (data) {
+    try {
+      const parsed = JSON.parse(data);
+      const deserialized = {};
+      for (const [qid, cache] of Object.entries(parsed)) {
+        if (!cache) continue;
+        deserialized[qid] = Object.assign({}, cache, {
+          iterExcluded: new Set(cache.iterExcluded || []),
+        });
+      }
+      state.privateQueryCache = deserialized;
+    } catch (e) {
+      console.error('Failed to parse private query cache:', e);
+      state.privateQueryCache = {};
+    }
+  } else {
+    state.privateQueryCache = {};
+  }
+}
+
+function saveCurrentPrivateQueryToCache() {
+  const queryId = state.currentPrivateQueryId;
+  if (!queryId) return;
+
+  state.privateQueryCache[queryId] = {
+    translatedText: $('private-translated-text')?.value || '',
+    candidates: state.privateCandidates || [],
+    selected: state.privateSelected,
+    candidateDraftFrames: Object.assign({}, state.privateCandidateDraftFrames),
+    currentFps: state.privateCurrentFps,
+    currentPlaybackFrame: state.privateCurrentPlaybackFrame,
+  };
+  savePrivateQueryCache();
+}
+
+function loadPrivateQueryFromCache(queryId, form) {
+  const cached = state.privateQueryCache[queryId];
+  if (cached) {
+    $('private-translated-text').value = cached.translatedText || form.translatedText || '';
+    state.privateCandidates = cached.candidates || [];
+    state.privateCandidateDraftFrames = Object.assign({}, cached.candidateDraftFrames);
+    state.privateCurrentFps = cached.currentFps;
+    state.privateCurrentPlaybackFrame = cached.currentPlaybackFrame;
+    
+    renderPrivateCandidates();
+    $('private-results-count').textContent = `${state.privateCandidates.length} candidates`;
+    
+    if (cached.selected !== null && cached.selected < state.privateCandidates.length) {
+      selectPrivateCandidate(cached.selected);
+    }
+  } else {
+    $('private-translated-text').value = form.translatedText || '';
+    renderPrivateCandidates();
+    $('private-results-count').textContent = '0 candidates';
+  }
+}
+
+function clearPrivateQueryWorkspace() {
+  const grid = $('private-candidates-grid');
+  if (grid) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    const message = document.createElement('p');
+    message.textContent = 'Chưa tìm kiếm query này (Riêng)';
+    empty.appendChild(message);
+    grid.replaceChildren(empty);
+  }
+  const resultCount = $('private-results-count');
+  if (resultCount) resultCount.textContent = '0 candidates';
+
+  const image = $('private-preview-img');
+  if (image) {
+    image.onload = null;
+    image.onerror = null;
+    image.removeAttribute('src');
+    image.style.display = 'none';
+  }
+  const video = $('private-preview-vid');
+  if (video) {
+    video.onloadeddata = null;
+    video.onerror = null;
+    if (typeof video.pause === 'function') video.pause();
+    video.removeAttribute('src');
+    if (typeof video.load === 'function') video.load();
+    video.style.display = 'none';
+  }
+  const placeholder = $('private-preview-placeholder');
+  if (placeholder) placeholder.style.display = 'flex';
+  const rankBadge = $('private-detail-rank-badge');
+  if (rankBadge) rankBadge.textContent = '—';
+  const scoresSection = $('private-detail-scores-section');
+  if (scoresSection) scoresSection.style.display = 'none';
+  const scoresBody = $('private-detail-scores-body');
+  if (scoresBody) scoresBody.replaceChildren();
+  const evidenceSection = $('private-detail-evidence-section');
+  if (evidenceSection) evidenceSection.style.display = 'none';
+  const frameInput = $('private-frame-input');
+  if (frameInput) frameInput.value = '';
+  const playbackFrame = $('private-video-current-frame');
+  if (playbackFrame) playbackFrame.textContent = '—';
+  const answerInput = $('private-answer-input');
+  if (answerInput) answerInput.value = '';
+  const trakeContainer = $('private-frame-picker-trake-container');
+  if (trakeContainer) {
+    trakeContainer.replaceChildren();
+    trakeContainer.style.display = 'none';
+  }
+  const confirmButton = $('private-btn-confirm-selection');
+  if (confirmButton) confirmButton.disabled = true;
+  const confirmSharedButton = $('private-btn-confirm-shared');
+  if (confirmSharedButton) confirmSharedButton.disabled = true;
+}
+
+function renderPrivateSelectionsList() {
+  const container = $('private-selections-list');
+  if (!container) return;
+  const queryId = currentPrivateQueryId();
+  const querySelections = state.privateSelections.filter((s) => s.queryId === queryId);
+  
+  const badge = $('private-sel-count');
+  if (badge) badge.textContent = String(querySelections.length);
+  
+  if (!querySelections.length) {
+    container.innerHTML = `
+      <div style="color:var(--text-muted);font-size:12px;text-align:center;padding:12px">
+        Chưa có lựa chọn nào
+      </div>`;
+    return;
+  }
+  
+  container.innerHTML = '';
+  querySelections.forEach((s) => {
+    const card = document.createElement('div');
+    card.className = 'selection-card';
+    const info = document.createElement('div');
+    info.className = 'selection-info';
+    
+    const vid = document.createElement('div');
+    vid.className = 'selection-vid';
+    vid.textContent = s.video_id;
+    
+    const meta = document.createElement('div');
+    meta.className = 'selection-meta';
+    
+    let details = `Frames: ${s.frames.join(', ')}`;
+    if (s.task === 'qa' && s.answer) {
+      details += ` | Ans: ${s.answer}`;
+    }
+    meta.textContent = details;
+    info.append(vid, meta);
+    
+    const removeButton = document.createElement('button');
+    removeButton.className = 'selection-del';
+    removeButton.title = 'Xoá';
+    removeButton.textContent = '✕';
+    removeButton.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const absoluteIdx = state.privateSelections.indexOf(s);
+      if (absoluteIdx !== -1) {
+        state.privateSelections.splice(absoluteIdx, 1);
+        savePrivateSelections();
+        renderPrivateSelectionsList();
+        renderPrivateManifestList();
+        toast('Đã xoá lựa chọn riêng', 'info');
+      }
+    });
+    
+    card.append(info, removeButton);
+    container.appendChild(card);
+  });
+}
+
+function renderPrivateManifestList() {
+  const list = $('private-query-manifest-list');
+  if (!list) return;
+  list.replaceChildren();
+  state.manifest.forEach((item) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `query-manifest-item${item.query_id === state.currentPrivateQueryId ? ' active' : ''}`;
+    const queryId = document.createElement('span');
+    queryId.className = 'manifest-query-id';
+    queryId.textContent = item.query_id;
+    const task = document.createElement('span');
+    task.className = 'manifest-task';
+    task.textContent = item.task.toUpperCase();
+    
+    const readiness = submissionHelpers.manifestQueryReadiness(item, state.privateSelections);
+    const status = document.createElement('span');
+    status.className = `manifest-readiness ${readiness.ready ? 'ready' : 'not-ready'}`;
+    status.textContent = readiness.ready ? 'Ready' : readiness.label;
+    
+    button.append(queryId, task, status);
+    button.addEventListener('click', () => selectPrivateManifestQuery(item.query_id));
+    list.appendChild(button);
+  });
+}
+
+function currentPrivateVideoFrame() {
+  const video = $('private-preview-vid');
+  if (!video || video.style.display === 'none') return null;
+  const fps = state.privateCurrentFps || 25;
+  return Math.round(video.currentTime * fps) + 1;
+}
+
+function updatePrivatePlaybackFrame() {
+  const frame = currentPrivateVideoFrame();
+  if (!Number.isInteger(frame)) return;
+  state.privateCurrentPlaybackFrame = frame;
+  const indicator = $('private-video-current-frame');
+  if (indicator) indicator.textContent = String(frame);
+}
+
+// ===========================================================================
+// THÊM ĐÁP ÁN THỦ CÔNG (MANUAL ENTRY TAB)
+// ===========================================================================
+
+async function fetchVideosList() {
+  try {
+    const res = await fetch('/api/videos');
+    const data = await res.json();
+    if (data.ok) {
+      state.videos = data.videos || [];
+      populateManualVideoSelect();
+    }
+  } catch (e) {
+    console.error('Failed to fetch videos list:', e);
+  }
+}
+
+function populateManualVideoSelect() {
+  const select = $('manual-video-select');
+  if (!select) return;
+  select.innerHTML = '<option value="">-- Chọn Video ID --</option>';
+  (state.videos || []).forEach((vid) => {
+    const opt = document.createElement('option');
+    opt.value = vid;
+    opt.textContent = vid;
+    select.appendChild(opt);
+  });
+}
+
+function populateManualQuerySelect() {
+  const select = $('manual-query-select');
+  if (!select) return;
+  const currentVal = select.value;
+  select.innerHTML = '<option value="">-- Chọn Query ID --</option>';
+  state.manifest.forEach((item) => {
+    const opt = document.createElement('option');
+    opt.value = item.query_id;
+    opt.textContent = `${item.query_id} (${item.task.toUpperCase()})`;
+    select.appendChild(opt);
+  });
+  if (currentVal && state.manifest.some(item => item.query_id === currentVal)) {
+    select.value = currentVal;
+  }
+}
+
+function onManualQueryChange() {
+  const select = $('manual-query-select');
+  const infoSection = $('manual-query-info');
+  const saveBtn = $('manual-btn-save');
+  const qaContainer = $('manual-qa-answer-container');
+  const singleFrameSection = $('manual-frame-single-section');
+  const trakeFrameSection = $('manual-frame-trake-section');
+  const trakeEventsSection = $('manual-trake-events-section');
+
+  if (!select || !select.value) {
+    if (infoSection) infoSection.style.display = 'none';
+    if (saveBtn) saveBtn.disabled = true;
+    if (qaContainer) qaContainer.style.display = 'none';
+    if (trakeEventsSection) trakeEventsSection.style.display = 'none';
+    return;
+  }
+
+  const queryId = select.value;
+  const item = state.manifest.find(q => q.query_id === queryId);
+  if (!item) return;
+
+  if (infoSection) {
+    $('manual-query-task').textContent = item.task;
+    $('manual-query-text').textContent = item.text;
+    infoSection.style.display = 'block';
+  }
+
+  if (saveBtn) saveBtn.disabled = false;
+
+  // QA specific fields
+  if (qaContainer) {
+    qaContainer.style.display = item.task === 'qa' ? 'flex' : 'none';
+  }
+
+  // TRAKE events count section in sidebar
+  if (trakeEventsSection) {
+    trakeEventsSection.style.display = item.task === 'trake' ? 'block' : 'none';
+  }
+
+  // Frame picker fields
+  if (item.task === 'trake') {
+    if (singleFrameSection) singleFrameSection.style.display = 'none';
+    if (trakeFrameSection) {
+      trakeFrameSection.style.display = 'flex';
+      const container = $('manual-frame-picker-trake-container');
+      container.innerHTML = '';
+      
+      // Get events count from input
+      let nEvents = item.n_events || 3;
+      const nEventsInput = $('manual-n-events-input');
+      if (nEventsInput) {
+        nEvents = parseInt(nEventsInput.value, 10) || nEvents;
+      }
+      
+      for (let i = 1; i <= nEvents; i++) {
+        const row = document.createElement('div');
+        row.className = 'frame-picker-row';
+        row.style.alignItems = 'center';
+        row.style.marginBottom = '6px';
+        
+        const label = document.createElement('span');
+        label.className = 'label';
+        label.style.width = '60px';
+        label.textContent = `Event ${i}:`;
+        
+        const input = document.createElement('input');
+        input.type = 'number';
+        input.className = 'manual-trake-frame-input';
+        input.id = `manual-trake-frame-input-${i}`;
+        input.dataset.eventIdx = i - 1;
+        input.min = '1';
+        input.style.flex = '1';
+        
+        // Update playhead when input changes
+        input.addEventListener('input', (e) => {
+          const val = parseInt(e.target.value, 10);
+          const vid = $('manual-preview-vid');
+          if (!isNaN(val) && vid && vid.style.display !== 'none') {
+            const fps = state.manualCurrentFps || 25;
+            vid.currentTime = Math.max(0, val - 1) / fps;
+          }
+        });
+
+        const grabBtn = document.createElement('button');
+        grabBtn.type = 'button';
+        grabBtn.className = 'btn btn-secondary btn-sm';
+        grabBtn.textContent = 'Get';
+        grabBtn.addEventListener('click', (e) => {
+          e.preventDefault();
+          const currentFrame = currentManualVideoFrame();
+          if (Number.isInteger(currentFrame)) {
+            input.value = currentFrame;
+          }
+        });
+        
+        row.append(label, input, grabBtn);
+        container.appendChild(row);
+      }
+    }
+  } else {
+    if (trakeFrameSection) trakeFrameSection.style.display = 'none';
+    if (singleFrameSection) singleFrameSection.style.display = 'block';
+  }
+
+  renderManualSelections();
+}
+
+function onManualVideoChange() {
+  const select = $('manual-video-select');
+  const vid = $('manual-preview-vid');
+  const placeholder = $('manual-preview-placeholder');
+  
+  if (!select || !select.value) {
+    if (vid) {
+      vid.removeAttribute('src');
+      if (typeof vid.load === 'function') vid.load();
+      vid.style.display = 'none';
+    }
+    if (placeholder) placeholder.style.display = 'flex';
+    return;
+  }
+
+  const videoId = select.value;
+  state.manualCurrentFps = null;
+  if (placeholder) placeholder.style.display = 'none';
+  if (vid) {
+    vid.style.display = 'block';
+    const targetSrc = `/api/video/${videoId}`;
+    vid.src = targetSrc;
+    vid.load();
+    
+    fetch(`/api/video_info/${videoId}`)
+      .then(res => res.json())
+      .then(data => {
+        state.manualCurrentFps = data.fps;
+        vid.currentTime = 0;
+      })
+      .catch(() => {
+        state.manualCurrentFps = 25;
+        vid.currentTime = 0;
+      });
+  }
+}
+
+function currentManualVideoFrame() {
+  const video = $('manual-preview-vid');
+  if (!video || video.style.display === 'none') return null;
+  const fps = state.manualCurrentFps || 25;
+  return Math.round(video.currentTime * fps) + 1;
+}
+
+function updateManualPlaybackFrame() {
+  const frame = currentManualVideoFrame();
+  if (!Number.isInteger(frame)) return;
+  state.manualCurrentPlaybackFrame = frame;
+  const indicator = $('manual-video-current-frame');
+  if (indicator) indicator.textContent = String(frame);
+  
+  const trakeIndicator = $('manual-video-trake-current-frame');
+  if (trakeIndicator) trakeIndicator.textContent = String(frame);
+}
+
+function grabManualCurrentFrame(e) {
+  if (e) e.preventDefault();
+  const currentFrame = currentManualVideoFrame();
+  if (Number.isInteger(currentFrame)) {
+    $('manual-frame-input').value = currentFrame;
+  }
+}
+
+function confirmManualSelection() {
+  const querySelect = $('manual-query-select');
+  const videoSelect = $('manual-video-select');
+  if (!querySelect || !querySelect.value) {
+    toast('Vui lòng chọn Query ID', 'warning');
+    return;
+  }
+  if (!videoSelect || !videoSelect.value) {
+    toast('Vui lòng chọn Video ID', 'warning');
+    return;
+  }
+
+  const queryId = querySelect.value;
+  const videoId = videoSelect.value;
+  const item = state.manifest.find(q => q.query_id === queryId);
+  if (!item) return;
+
+  if (item.task === 'trake') {
+    let nEvents = item.n_events || 3;
+    const nEventsInput = $('manual-n-events-input');
+    if (nEventsInput) {
+      nEvents = parseInt(nEventsInput.value, 10) || nEvents;
+    }
+    const frames = [];
+    let hasMissing = false;
+    for (let i = 1; i <= nEvents; i++) {
+      const inp = $(`manual-trake-frame-input-${i}`);
+      const val = inp ? parseInt(inp.value, 10) : NaN;
+      if (isNaN(val) || val < 1) {
+        hasMissing = true;
+      }
+      frames.push(val);
+    }
+    if (hasMissing) {
+      toast(`Vui lòng điền đủ ${nEvents} sự kiện cho TRAKE!`, 'warning');
+      return;
+    }
+    
+    const isDup = state.selections.some(s => s.queryId === queryId && s.video_id === videoId && JSON.stringify(s.frames) === JSON.stringify(frames));
+    if (isDup) {
+      toast('Lựa chọn này đã tồn tại trong danh sách!', 'warning');
+      return;
+    }
+    
+    state.selections.push({
+      queryId,
+      task: 'trake',
+      video_id: videoId,
+      frames,
+      answer: '',
+      rank: state.selections.filter(s => s.queryId === queryId).length + 1
+    });
+    toast(`Đã thêm ${videoId} (${nEvents} events) vào TRAKE`, 'success');
+  } 
+  else if (item.task === 'qa') {
+    const frame = parseInt($('manual-frame-input')?.value || '0', 10);
+    if (isNaN(frame) || frame < 1) {
+      toast('Frame index không hợp lệ', 'warning');
+      return;
+    }
+    const answer = submissionHelpers.prepareQaAnswer($('manual-answer-input')?.value || '');
+    if (!answer.trim()) {
+      toast('Vui lòng nhập câu trả lời cho Q&A!', 'warning');
+      return;
+    }
+    if (submissionHelpers.unicodeCodePointLength(answer) > 100) {
+      toast('Câu trả lời vượt quá giới hạn 100 ký tự!', 'error');
+      return;
+    }
+    
+    const isDup = state.selections.some(s => s.queryId === queryId && s.video_id === videoId && s.frames[0] === frame && s.answer === answer);
+    if (isDup) {
+      toast('Lựa chọn này đã tồn tại trong danh sách!', 'warning');
+      return;
+    }
+    
+    state.selections.push({
+      queryId,
+      task: 'qa',
+      video_id: videoId,
+      frames: [frame],
+      answer,
+      rank: state.selections.filter(s => s.queryId === queryId).length + 1
+    });
+    toast(`Đã thêm ${videoId} f${frame} vào Q&A`, 'success');
+  } 
+  else { // kis
+    const frame = parseInt($('manual-frame-input')?.value || '0', 10);
+    if (isNaN(frame) || frame < 1) {
+      toast('Frame index không hợp lệ', 'warning');
+      return;
+    }
+    
+    const isDup = state.selections.some(s => s.queryId === queryId && s.video_id === videoId && s.frames[0] === frame);
+    if (isDup) {
+      toast('Lựa chọn này đã tồn tại trong danh sách!', 'warning');
+      return;
+    }
+    
+    state.selections.push({
+      queryId,
+      task: 'kis',
+      video_id: videoId,
+      frames: [frame],
+      answer: '',
+      rank: state.selections.filter(s => s.queryId === queryId).length + 1
+    });
+    toast(`Đã thêm ${videoId} f${frame} vào KIS`, 'success');
+  }
+
+  saveSelections();
+  renderSelectionsList();
+  renderManifestList();
+  renderExportTable();
+  renderManualSelections();
+  
+  toast('Đã thêm đáp án thủ công vào không gian chung', 'success');
+}
+
+function renderManualSelections() {
+  const container = $('manual-selections-list');
+  const countBadge = $('manual-sel-count');
+  if (!container) return;
+
+  const queryId = $('manual-query-select')?.value;
+  if (!queryId) {
+    container.innerHTML = `
+      <div style="color:var(--text-muted);font-size:12px;text-align:center;padding:12px">
+        Chọn query để xem danh sách đáp án
+      </div>`;
+    if (countBadge) countBadge.textContent = '0';
+    return;
+  }
+
+  const querySelections = state.selections.filter(s => s.queryId === queryId);
+  if (countBadge) countBadge.textContent = String(querySelections.length);
+
+  if (!querySelections.length) {
+    container.innerHTML = `
+      <div style="color:var(--text-muted);font-size:12px;text-align:center;padding:12px">
+        Chưa có lựa chọn nào cho query này
+      </div>`;
+    return;
+  }
+
+  container.innerHTML = '';
+  querySelections.forEach((s) => {
+    const card = document.createElement('div');
+    card.className = 'selection-card';
+    const info = document.createElement('div');
+    info.className = 'selection-info';
+    
+    const vid = document.createElement('div');
+    vid.className = 'selection-vid';
+    vid.textContent = s.video_id;
+    
+    const meta = document.createElement('div');
+    meta.className = 'selection-meta';
+    
+    let details = `Frames: ${s.frames.join(', ')}`;
+    if (s.task === 'qa' && s.answer) {
+      details += ` | Ans: ${s.answer}`;
+    }
+    meta.textContent = details;
+    info.append(vid, meta);
+    
+    const removeButton = document.createElement('button');
+    removeButton.className = 'selection-del';
+    removeButton.title = 'Xoá';
+    removeButton.textContent = '✕';
+    removeButton.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const absoluteIdx = state.selections.indexOf(s);
+      if (absoluteIdx !== -1) {
+        state.selections.splice(absoluteIdx, 1);
+        saveSelections();
+        renderSelectionsList();
+        renderManifestList();
+        renderExportTable();
+        renderManualSelections();
+        toast('Đã xoá đáp án', 'info');
+      }
+    });
+    
+    card.append(info, removeButton);
+    container.appendChild(card);
+  });
+}
+

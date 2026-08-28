@@ -87,7 +87,7 @@ def test_zip_validation_accepts_expected_paths_in_reverse_member_order():
 def test_requires_rows_for_every_manifest_query():
     report = validate_submission(MANIFEST, _valid_rows()[:2])
 
-    assert "missing_query_rows" in _codes(report)
+    assert "missing_query_rows" in [issue.code for issue in report.warnings]
 
 
 def test_rejects_an_empty_manifest_with_a_stable_issue():

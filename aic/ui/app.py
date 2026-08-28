@@ -159,6 +159,97 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AIC 2026 Video Retrieval", version="0.1.0", lifespan=lifespan)
 
+from fastapi import WebSocket, WebSocketDisconnect
+import json
+
+# Shared state variables
+SHARED_STATE_PATH = Path("data/shared_state.json")
+shared_manifest: list = []
+shared_selections: list = []
+shared_query_cache: dict = {}
+
+def load_shared_state():
+    global shared_manifest, shared_selections, shared_query_cache
+    if SHARED_STATE_PATH.exists():
+        try:
+            with open(SHARED_STATE_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            shared_manifest = data.get("manifest", [])
+            shared_selections = data.get("selections", [])
+            shared_query_cache = data.get("queryCache", {})
+            logger.info("Loaded shared state from %s", SHARED_STATE_PATH)
+        except Exception as e:
+            logger.warning("Error loading shared state: %s", e)
+
+def save_shared_state():
+    try:
+        SHARED_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(SHARED_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump({
+                "manifest": shared_manifest,
+                "selections": shared_selections,
+                "queryCache": shared_query_cache
+            }, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning("Error saving shared state: %s", e)
+
+# Load state on startup
+load_shared_state()
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict, sender: WebSocket):
+        for connection in self.active_connections:
+            if connection != sender:
+                try:
+                    await connection.send_json(message)
+                except Exception:
+                    pass
+
+manager = ConnectionManager()
+
+@app.websocket("/api/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    global shared_manifest, shared_selections, shared_query_cache
+    await manager.connect(websocket)
+    try:
+        # Send initial state
+        await websocket.send_json({
+            "type": "init",
+            "manifest": shared_manifest,
+            "selections": shared_selections,
+            "queryCache": shared_query_cache
+        })
+        while True:
+            data = await websocket.receive_json()
+            if data.get("type") == "update":
+                shared_manifest = data.get("manifest", [])
+                shared_selections = data.get("selections", [])
+                shared_query_cache = data.get("queryCache", {})
+                save_shared_state()
+                # Broadcast to all other clients
+                await manager.broadcast({
+                    "type": "update",
+                    "manifest": shared_manifest,
+                    "selections": shared_selections,
+                    "queryCache": shared_query_cache
+                }, websocket)
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+    except Exception as e:
+        logger.warning("WebSocket handler error: %s", e)
+        manager.disconnect(websocket)
+
 _SUBMISSION_REPORT_PATHS = {"/api/export", "/api/query-pack/texts"}
 
 
@@ -606,7 +697,7 @@ def _get_frame_mapping():
     if _frame_to_n is not None:
         return _frame_to_n
     
-    _frame_to_n = {}
+    mapping = {}
     if META_PATH and META_PATH.exists():
         try:
             import json
@@ -617,12 +708,12 @@ def _get_frame_mapping():
                 fidx = meta.get("frame_idx")
                 n = meta.get("keyframe_num")
                 if vid is not None and fidx is not None and n is not None:
-                    _frame_to_n[(vid, fidx)] = n
-            logger.info("Loaded frame mapping with %d items from %s", len(_frame_to_n), META_PATH)
+                    mapping[(vid, fidx)] = n
+            logger.info("Loaded frame mapping with %d items from %s", len(mapping), META_PATH)
         except Exception as e:
             logger.warning("Error loading metadata for frame mapping: %s", e)
 
-    if not _frame_to_n and SIGLIP_META_PATH and SIGLIP_META_PATH.exists():
+    if not mapping and SIGLIP_META_PATH and SIGLIP_META_PATH.exists():
         try:
             import json
             with open(SIGLIP_META_PATH, "r", encoding="utf-8") as f:
@@ -632,11 +723,12 @@ def _get_frame_mapping():
                 fidx = meta.get("frame_idx")
                 n = meta.get("keyframe_num")
                 if vid is not None and fidx is not None and n is not None:
-                    _frame_to_n[(vid, fidx)] = n
-            logger.info("Loaded frame mapping with %d items from %s (SigLIP)", len(_frame_to_n), SIGLIP_META_PATH)
+                    mapping[(vid, fidx)] = n
+            logger.info("Loaded frame mapping with %d items from %s (SigLIP)", len(mapping), SIGLIP_META_PATH)
         except Exception as e:
             logger.warning("Error loading SigLIP metadata for frame mapping: %s", e)
 
+    _frame_to_n = mapping
     return _frame_to_n
 
 
@@ -840,6 +932,18 @@ def get_video(video_id: str, request: Request):
     # Fallback dự phòng nếu không tìm thấy video_id trong metadata
     prefix = video_id.split('_')[0]
     return RedirectResponse(f"{HF_DATASET_URL}/videos/Videos_{prefix}_a/video/{video_id}.mp4")
+
+
+@app.get("/api/videos")
+def get_videos():
+    """Trả về danh sách tất cả các video_id được phát hiện trong metadata hoặc mapping."""
+    meta = load_video_metadata()
+    if meta:
+        return {"ok": True, "videos": sorted(list(meta.keys()))}
+    
+    mapping = _get_frame_mapping()
+    video_ids = sorted(list({vid for (vid, fidx) in mapping.keys()}))
+    return {"ok": True, "videos": video_ids}
 
 
 @app.post("/api/export")

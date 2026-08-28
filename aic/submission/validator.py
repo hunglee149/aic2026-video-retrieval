@@ -98,10 +98,10 @@ def validate_submission(
     for query in manifest:
         query_rows = rows_by_query[query.query_id]
         if not query_rows:
-            report.errors.append(
+            report.warnings.append(
                 ValidationIssue(
                     "missing_query_rows",
-                    f"Query {query.query_id!r} requires at least one row",
+                    f"Query {query.query_id!r} has no rows (will export empty file)",
                     query_id=query.query_id,
                 )
             )

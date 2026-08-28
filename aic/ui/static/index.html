@@ -25,6 +25,8 @@
 
     <nav class="nav-tabs">
       <button class="nav-tab active" id="tab-search" onclick="switchView('search')">Tìm kiếm</button>
+      <button class="nav-tab" id="tab-private-search" onclick="switchView('private-search')">Tìm kiếm riêng</button>
+      <button class="nav-tab" id="tab-manual-entry" onclick="switchView('manual-entry')">Thêm đáp án</button>
       <button class="nav-tab" id="tab-iterative" onclick="switchView('iterative')">Iterative</button>
       <button class="nav-tab" id="tab-export" onclick="switchView('export')">Export</button>
     </nav>
@@ -83,7 +85,7 @@
 
         <div class="sidebar-section">
           <label class="label" for="query-id-input">Query ID</label>
-          <input type="text" id="query-id-input" value="pack1_q1_kis" placeholder="pack1_q1_kis"/>
+          <input type="text" id="query-id-input" value="" placeholder="q1"/>
         </div>
 
         <div class="sidebar-section" id="n-events-section" style="display:none">
@@ -216,6 +218,235 @@
         </div>
       </aside>
     </div><!-- /view-search -->
+
+    <!-- ============================================================
+         VIEW: PRIVATE SEARCH
+         ============================================================ -->
+    <div class="view" id="view-private-search">
+
+      <!-- SIDEBAR -->
+      <aside id="private-sidebar">
+        <div class="sidebar-section">
+          <label class="label" for="private-query-input">Câu hỏi (Tiếng Việt) - Riêng</label>
+          <textarea id="private-query-input" rows="4"
+            placeholder="Nhập mô tả cảnh cần tìm (riêng tư)..."></textarea>
+          <div class="query-manifest-list" id="private-query-manifest-list" aria-label="Danh sách query trong pack"></div>
+        </div>
+
+        <div class="sidebar-section">
+          <span class="label">Loại task</span>
+          <div class="task-pills">
+            <button class="task-pill active" id="private-pill-kis"   onclick="selectPrivateTask('kis')">KIS</button>
+            <button class="task-pill"        id="private-pill-qa"    onclick="selectPrivateTask('qa')">Q&amp;A</button>
+            <button class="task-pill"        id="private-pill-trake" onclick="selectPrivateTask('trake')">TRAKE</button>
+          </div>
+        </div>
+
+        <div class="sidebar-section">
+          <div class="translate-row">
+            <label class="label" style="flex:1" for="private-translated-text">Bản dịch (EN)</label>
+            <button class="btn-translate" onclick="doPrivateTranslate()" id="private-btn-translate">
+              Dịch
+            </button>
+          </div>
+          <textarea id="private-translated-text" rows="3"
+            placeholder="Auto-translate hoặc tự nhập..."></textarea>
+        </div>
+
+        <div class="sidebar-section">
+          <label class="label" for="private-query-id-input">Query ID</label>
+          <input type="text" id="private-query-id-input" value="" placeholder="q1"/>
+        </div>
+
+        <div class="sidebar-section" id="private-n-events-section" style="display:none">
+          <label class="label" for="private-n-events-input">Số events (TRAKE)</label>
+          <input type="number" id="private-n-events-input" value="3" min="1" max="20"/>
+          <label class="trake-confirmation">
+            <input type="checkbox" id="private-trake-events-confirmed"/>
+            Đã xác nhận số events cho query này
+          </label>
+        </div>
+
+        <div class="sidebar-section">
+          <button class="btn btn-primary" onclick="doPrivateSearch()" id="private-btn-search">
+            Tìm kiếm riêng
+          </button>
+        </div>
+
+        <div class="sidebar-section">
+          <div class="slider-row">
+            <span class="slider-label">Top-K:</span>
+            <input type="range" id="private-topk-slider" min="10" max="100" step="10" value="100"
+              oninput="document.getElementById('private-topk-val').textContent=this.value"/>
+            <span class="slider-val" id="private-topk-val">100</span>
+          </div>
+        </div>
+      </aside>
+
+      <!-- CENTER: Results -->
+      <section id="private-results-panel">
+        <div class="results-header">
+          <span class="results-title">Kết quả tìm kiếm (Riêng)</span>
+          <span class="badge badge-purple" id="private-results-count">0 candidates</span>
+          <span class="badge badge-gray" id="private-results-task-badge">KIS</span>
+          <div class="results-header-spacer"></div>
+        </div>
+
+        <div id="private-candidates-grid">
+          <div class="empty-state">
+            <p>Nhập câu hỏi và nhấn <strong>Tìm kiếm riêng</strong> để xem kết quả</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- RIGHT: Detail panel -->
+      <aside id="private-detail-panel">
+        <div class="detail-header">
+          <div class="detail-heading">
+            <span class="detail-title">Chi tiết lựa chọn (Riêng)</span>
+            <span class="detail-video-id" id="private-detail-video-id">—</span>
+          </div>
+          <span class="badge badge-gray" id="private-detail-rank-badge">—</span>
+        </div>
+        <div class="detail-body">
+          <!-- Fixed mini preview -->
+          <div id="private-preview-img-wrap">
+            <div class="preview-placeholder" id="private-preview-placeholder">
+              <span>Chọn một candidate</span>
+            </div>
+            <img id="private-preview-img" src="" alt="" style="display:none"/>
+            <video id="private-preview-vid" controls style="display:none"></video>
+          </div>
+
+          <!-- Scrollable controls -->
+          <div class="detail-scroll">
+            <!-- Scores -->
+            <div class="detail-section" id="private-detail-scores-section" style="display:none">
+              <div class="detail-section-title">Điểm số</div>
+              <div id="private-detail-scores-body"></div>
+            </div>
+
+            <!-- Evidence -->
+            <div class="detail-section" id="private-detail-evidence-section" style="display:none">
+              <div class="detail-section-title">Evidence</div>
+              <div class="evidence-text" id="private-detail-evidence-text"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="detail-footer">
+          <button class="btn btn-green" onclick="switchView('export')" style="width:100%">
+            Xem &amp; Export
+          </button>
+        </div>
+      </aside>
+    </div><!-- /view-private-search -->
+
+    <!-- ============================================================
+         VIEW: MANUAL ENTRY
+         ============================================================ -->
+    <div class="view" id="view-manual-entry">
+      <!-- Left side: Form -->
+      <aside id="manual-sidebar">
+        <div class="sidebar-section">
+          <label class="label" for="manual-query-select">Chọn Query ID</label>
+          <select id="manual-query-select" style="width: 100%;" onchange="onManualQueryChange()">
+            <!-- Populated dynamically -->
+          </select>
+        </div>
+
+        <!-- Query text box and Task type -->
+        <div class="sidebar-section" id="manual-query-info" style="display:none;">
+          <label class="label">Nội dung câu hỏi</label>
+          <div class="evidence-text" id="manual-query-text" style="font-size:12px; padding:10px; background:var(--bg-base); border-radius:var(--radius-md); border:1px solid var(--border); min-height:60px;"></div>
+          <div style="font-size:12px; color:var(--text-secondary); margin-top:6px;">
+            Loại task: <strong id="manual-query-task" style="text-transform:uppercase;">KIS</strong>
+          </div>
+        </div>
+
+        <div class="sidebar-section">
+          <label class="label" for="manual-video-select">Chọn Video ID</label>
+          <select id="manual-video-select" style="width: 100%;" onchange="onManualVideoChange()">
+            <!-- Populated dynamically -->
+          </select>
+        </div>
+
+        <!-- Number of events for TRAKE -->
+        <div class="sidebar-section" id="manual-trake-events-section" style="display:none;">
+          <label class="label" for="manual-n-events-input">Số events (TRAKE)</label>
+          <input type="number" id="manual-n-events-input" min="1" max="10" value="3" style="width:100%;" onchange="onManualQueryChange()"/>
+        </div>
+
+        <div class="sidebar-section" style="display:flex; flex-direction:column; gap:8px;">
+          <button class="btn btn-primary" onclick="confirmManualSelection()" id="manual-btn-save" disabled>
+            Thêm vào danh sách chung (Shared)
+          </button>
+        </div>
+      </aside>
+
+      <!-- Center & Right side: Preview & Frame Picker -->
+      <section id="manual-results-panel" style="flex:1; display:flex; flex-direction:row; overflow:hidden;">
+        <!-- Preview Panel -->
+        <div style="flex:2; display:flex; flex-direction:column; background:var(--bg-base); border-right:1px solid var(--border); padding:16px;">
+          <div class="results-header" style="padding:0 0 12px 0; border-bottom:1px solid var(--border); margin-bottom:12px;">
+            <span class="results-title">Xem trước video</span>
+            <div class="results-header-spacer"></div>
+          </div>
+          <div id="manual-preview-wrap" style="flex:1; display:flex; align-items:center; justify-content:center; background:#000; border-radius:var(--radius-md); overflow:hidden; position:relative;">
+            <div class="preview-placeholder" id="manual-preview-placeholder">
+              <span>Chọn video để xem phát</span>
+            </div>
+            <video id="manual-preview-vid" controls style="width:100%; height:100%; display:none; object-fit:contain;"></video>
+          </div>
+        </div>
+
+        <!-- Frame Picker & Selections -->
+        <aside style="flex:1; width:300px; background:var(--bg-surface); display:flex; flex-direction:column; overflow-y:auto; padding:16px; gap:16px; border-left:1px solid var(--border);">
+          <div class="detail-header" style="padding:0 0 12px 0; border-bottom:1px solid var(--border);">
+            <span class="detail-title">Chọn Frame đáp án</span>
+          </div>
+
+          <!-- Single Frame Input (KIS, QA) -->
+          <div class="detail-section" id="manual-frame-single-section" style="padding:0; border:none;">
+            <div class="playback-frame-status" style="margin-bottom:8px;">
+              Frame đang phát: <strong id="manual-video-current-frame">—</strong>
+            </div>
+            <div class="frame-picker-row">
+              <input type="number" id="manual-frame-input" placeholder="Frame index" min="1" style="flex:1;"/>
+              <button type="button" class="btn btn-secondary btn-sm" onclick="grabManualCurrentFrame(event)">
+                Get
+              </button>
+            </div>
+            
+            <!-- QA answer input field -->
+            <div id="manual-qa-answer-container" style="display:none; margin-top:12px; display:flex; flex-direction:column; gap:6px;">
+              <label class="label" for="manual-answer-input">Câu trả lời (Q&amp;A)</label>
+              <textarea id="manual-answer-input" placeholder="Nhập câu trả lời..."></textarea>
+            </div>
+          </div>
+
+          <!-- TRAKE Multi-frame Section -->
+          <div class="detail-section" id="manual-frame-trake-section" style="padding:0; border:none; display:none; flex-direction:column; gap:8px;">
+            <div class="playback-frame-status">
+              Frame đang phát: <strong id="manual-video-trake-current-frame">—</strong>
+            </div>
+            <div id="manual-frame-picker-trake-container" style="display:flex; flex-direction:column; gap:6px;">
+              <!-- Dynamic event slots -->
+            </div>
+          </div>
+
+          <!-- Existing selections for the chosen query -->
+          <div class="detail-section" style="padding:0; border:none;">
+            <div class="detail-section-title">Lựa chọn đã lưu (<span id="manual-sel-count">0</span>)</div>
+            <div class="selections-list" id="manual-selections-list">
+              <div style="color:var(--text-muted);font-size:12px;text-align:center;padding:12px">
+                Chưa có lựa chọn nào
+              </div>
+            </div>
+          </div>
+        </aside>
+      </section>
+    </div><!-- /view-manual-entry -->
 
     <!-- ============================================================
          VIEW 2: ITERATIVE

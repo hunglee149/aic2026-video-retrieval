@@ -40,8 +40,6 @@ def write_submission(
     for query_id, rows in rows_by_query.items():
         _validate_query_id(query_id)
         materialized = [list(row) for row in rows]
-        if not materialized:
-            raise ValueError(f"query {query_id!r} must contain at least one row")
         if len(materialized) > MAX_ROWS_PER_QUERY:
             raise ValueError(
                 f"query {query_id!r} has {len(materialized)} rows; "

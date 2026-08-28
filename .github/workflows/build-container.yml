@@ -1,0 +1,150 @@
+name: Build and Deploy AIC
+
+on:
+  push:
+    branches:
+      - Duong/fix-ui-and-hf
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+concurrency:
+  group: aic-production-deploy
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_REPOSITORY: aic-video-retrieval
+
+  # Sửa 2 giá trị này theo resource production thật của bạn.
+  AZURE_RESOURCE_GROUP: aic-prod-rg
+  AZURE_CONTAINER_APP: aic-video-search
+
+jobs:
+  build-and-deploy:
+    name: Build image and deploy to Azure
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout deploy branch
+        uses: actions/checkout@v4
+
+      - name: Set lowercase GHCR image name
+        shell: bash
+        run: |
+          set -euo pipefail
+          OWNER="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          echo "IMAGE_NAME=${REGISTRY}/${OWNER}/${IMAGE_REPOSITORY}" >> "$GITHUB_ENV"
+          echo "IMAGE_SHA=${REGISTRY}/${OWNER}/${IMAGE_REPOSITORY}:${GITHUB_SHA}" >> "$GITHUB_ENV"
+          echo "IMAGE_LATEST=${REGISTRY}/${OWNER}/${IMAGE_REPOSITORY}:latest" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            INCLUDE_BM25=1
+            PRELOAD_MODELS=1
+          tags: |
+            ${{ env.IMAGE_SHA }}
+            ${{ env.IMAGE_LATEST }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Login to Azure with OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install/update Azure Container Apps CLI extension
+        shell: bash
+        run: |
+          set -euo pipefail
+          az extension add \
+            --name containerapp \
+            --upgrade \
+            --allow-preview true
+
+      - name: Deploy immutable image to Azure Container Apps
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Deploying ${IMAGE_SHA}"
+
+          az containerapp update \
+            --name "${AZURE_CONTAINER_APP}" \
+            --resource-group "${AZURE_RESOURCE_GROUP}" \
+            --image "${IMAGE_SHA}"
+
+      - name: Get application URL
+        id: app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FQDN="$(az containerapp show \
+            --name "${AZURE_CONTAINER_APP}" \
+            --resource-group "${AZURE_RESOURCE_GROUP}" \
+            --query properties.configuration.ingress.fqdn \
+            -o tsv)"
+
+          if [ -z "$FQDN" ]; then
+            echo "Azure Container App has no public FQDN."
+            exit 1
+          fi
+
+          echo "fqdn=$FQDN" >> "$GITHUB_OUTPUT"
+          echo "Application URL: https://${FQDN}"
+
+      - name: Smoke test /healthz
+        shell: bash
+        env:
+          FQDN: ${{ steps.app.outputs.fqdn }}
+        run: |
+          set -euo pipefail
+
+          URL="https://${FQDN}/healthz"
+          echo "Checking ${URL}"
+
+          for attempt in {1..20}; do
+            STATUS="$(curl \
+              --silent \
+              --show-error \
+              --location \
+              --output /tmp/health.txt \
+              --write-out "%{http_code}" \
+              --max-time 30 \
+              "$URL" || true)"
+
+            echo "Attempt ${attempt}: HTTP ${STATUS}"
+
+            if [ "$STATUS" = "200" ]; then
+              cat /tmp/health.txt
+              echo
+              echo "Deployment succeeded."
+              exit 0
+            fi
+
+            sleep 15
+          done
+
+          echo "Health check failed."
+          cat /tmp/health.txt 2>/dev/null || true
+          exit 1

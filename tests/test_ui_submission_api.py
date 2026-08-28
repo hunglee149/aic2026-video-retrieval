@@ -282,9 +282,10 @@ def test_invalid_export_returns_422_with_stable_validation_codes(client):
         "invalid_frame",
         "kis_frame_count",
         "kis_unexpected_answer",
+    ]
+    assert [warning["code"] for warning in detail["warnings"]] == [
         "missing_query_rows",
     ]
-    assert detail["warnings"] == []
 
 
 def test_empty_export_manifest_returns_the_shared_stable_422_report(client):
