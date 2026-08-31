@@ -217,7 +217,21 @@ function createMainHarness() {
     Blob,
     console,
     document,
-    fetch: async () => { throw new Error('unexpected fetch'); },
+    fetch: async (url) => {
+      if (url === '/api/videos') {
+        return {
+          ok: true,
+          async json() { return { ok: true, videos: [] }; }
+        };
+      }
+      if (url === '/api/status') {
+        return {
+          ok: true,
+          async json() { return { ok: true, retriever: 'dummy', retrievers: [], ready_count: 1 }; }
+        };
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    },
     localStorage: {
       getItem(key) { return storage.has(key) ? storage.get(key) : null; },
       setItem(key, value) { storage.set(key, String(value)); },
@@ -227,9 +241,53 @@ function createMainHarness() {
     setTimeout() { return 1; },
     clearTimeout() {},
     confirm() { return true; },
-    URL: {
-      createObjectURL() { return 'blob:test'; },
-      revokeObjectURL() {},
+    URL: Object.assign(
+      class {
+        constructor(url, base) {
+          this.pathname = (url.startsWith('http') || (base && base.startsWith('http')))
+            ? '/' + url.split('/').slice(3).join('/')
+            : url;
+        }
+      },
+      {
+        createObjectURL() { return 'blob:test'; },
+        revokeObjectURL() {},
+      }
+    ),
+    location: {
+      href: 'http://localhost:8000/',
+      protocol: 'http:',
+      host: 'localhost:8000',
+      hostname: 'localhost',
+      pathname: '/',
+    },
+    WebSocket: class FakeWebSocket {
+      constructor(url) {
+        this.url = url;
+        this.sent = [];
+        this.readyState = 1; // OPEN
+        setTimeout(() => {
+          if (this.onopen) this.onopen();
+        }, 0);
+      }
+      send(data) {
+        this.sent.push(data);
+      }
+      close() {
+        this.readyState = 3; // CLOSED
+        if (this.onclose) this.onclose();
+      }
+    },
+    addEventListener(type, listener) {
+      if (type === 'DOMContentLoaded') {
+        if (!document.listeners) document.listeners = {};
+        if (!document.listeners.DOMContentLoaded) document.listeners.DOMContentLoaded = [];
+        document.listeners.DOMContentLoaded.push(listener);
+      } else {
+        if (!this._listeners) this._listeners = {};
+        if (!this._listeners[type]) this._listeners[type] = [];
+        this._listeners[type].push(listener);
+      }
     },
   };
   sandbox.window = sandbox;

@@ -86,6 +86,15 @@ def _dummy_client():
     stub = types.ModuleType("aic.retrieval")
     stub.dummy = recorder
 
+    import aic.core.local_translation
+    import aic.core.query_processor
+    previous_translate = getattr(aic.core.local_translation, "translate_text", _MISSING)
+    previous_qp_translate = getattr(aic.core.query_processor, "_local_translate", _MISSING)
+    
+    mock_fn = lambda text: text + " (translated)"
+    aic.core.local_translation.translate_text = mock_fn
+    aic.core.query_processor._local_translate = mock_fn
+
     try:
         os.environ["AIC_USE_DUMMY"] = "1"
         sys.modules.pop("aic.ui.app", None)
@@ -104,6 +113,10 @@ def _dummy_client():
         finally:
             client.close()
     finally:
+        if previous_translate is not _MISSING:
+            aic.core.local_translation.translate_text = previous_translate
+        if previous_qp_translate is not _MISSING:
+            aic.core.query_processor._local_translate = previous_qp_translate
         _restore(sys.modules, "aic.ui.app", previous_app)
         _restore(sys.modules, "aic.retrieval", previous_retrieval)
         _restore_attr(aic_ui_package, "app", previous_app_attr)

@@ -45,6 +45,15 @@ def test_video_endpoints():
     from aic.ui.app import app as fastapi_app
     client = TestClient(fastapi_app)
     
+    # Kiểm tra tính hoạt động của TestClient và app thông qua healthz ping
+    try:
+        ping_res = client.get("/healthz")
+        ping_ok = ping_res.status_code == 200 and ping_res.json() == {"ok": True}
+    except Exception as e:
+        pytest.fail(f"Lỗi ở thư viện / bộ kiểm thử (TestClient ping thất bại): {e}")
+    
+    assert ping_ok, "Lỗi ở thư viện / bộ kiểm thử: không ping được FastAPI app qua /healthz"
+    
     mock_meta = {
         "L21_V001": {"path": "videos/Videos_L21_a/video/L21_V001.mp4", "fps": 30.0}
     }

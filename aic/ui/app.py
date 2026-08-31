@@ -67,10 +67,40 @@ logger = logging.getLogger(__name__)
 KEYFRAMES_DIR = Path(os.environ.get("AIC_KEYFRAMES_DIR", "data/keyframes"))
 
 def resolve_path(remote_filename: Optional[str]) -> Optional[Path]:
-    """Tải/đọc trực tiếp file từ Hugging Face Hub cache."""
+    """Tải/đọc trực tiếp file từ Hugging Face Hub cache hoặc lấy từ thư mục local."""
     if not remote_filename:
         return None
 
+    # Mapping remote filenames to env variables
+    env_mappings = {
+        "local/clip_faiss.index": "AIC_INDEX_PATH",
+        "local/clip_metadata.json": "AIC_META_PATH",
+        "data/input/input/index/text_search_index.pkl": "AIC_TEXT_INDEX_PATH",
+        "data/input/input/index/siglip_faiss.index": "AIC_SIGLIP_INDEX_PATH",
+        "data/input/input/index/siglip_metadata.json": "AIC_SIGLIP_META_PATH",
+        "local/video_metadata.json": "AIC_VIDEO_METADATA_PATH",
+    }
+    
+    # 1. Kiểm tra biến môi trường tương ứng
+    env_name = env_mappings.get(remote_filename)
+    if env_name:
+        env_val = os.environ.get(env_name, "").strip()
+        if env_val:
+            p = Path(env_val)
+            if p.exists():
+                return p
+            logger.warning("Đường dẫn cấu hình qua %s = %s không tồn tại locally.", env_name, env_val)
+
+    # 2. Kiểm tra nếu file đã tồn tại ở workspace hiện tại
+    p_local = Path(remote_filename)
+    if p_local.exists():
+        return p_local
+        
+    p_local_short = Path("local") / p_local.name
+    if p_local_short.exists():
+        return p_local_short
+
+    # 3. Tải qua Hugging Face Hub
     repo_id = os.environ.get("AIC_HF_REPO_ID", "manhha2502/fullhd")
     revision = os.environ.get("AIC_HF_REVISION", "main")
     cache_dir = os.environ.get("AIC_HF_CACHE_DIR") or None
@@ -987,6 +1017,11 @@ def export_submission(req: ExportRequest):
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
 
 
 @app.get("/")

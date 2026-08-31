@@ -16,9 +16,12 @@ def main():
     open_clip.create_model_and_transforms("ViT-B-32-quickgelu", pretrained="openai")
     open_clip.get_tokenizer("ViT-B-32-quickgelu")
 
-    logger.info("Prefetching open_clip SigLIP hf-hub:timm/ViT-SO400M-14-SigLIP2 model...")
-    open_clip.create_model_from_pretrained("hf-hub:timm/ViT-SO400M-14-SigLIP2")
-    open_clip.get_tokenizer("hf-hub:timm/ViT-SO400M-14-SigLIP2")
+    if os.environ.get("AIC_USE_SIGLIP", "0") == "1":
+        logger.info("Prefetching open_clip SigLIP hf-hub:timm/ViT-SO400M-14-SigLIP2 model...")
+        open_clip.create_model_from_pretrained("hf-hub:timm/ViT-SO400M-14-SigLIP2")
+        open_clip.get_tokenizer("hf-hub:timm/ViT-SO400M-14-SigLIP2")
+    else:
+        logger.info("Skipping SigLIP prefetch (AIC_USE_SIGLIP != 1)")
 
     logger.info("All model weights prefetched successfully!")
 
