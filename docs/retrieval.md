@@ -150,8 +150,46 @@ Xem `.env.example`. Các biến của module này:
 | `AIC_CLIP_DEVICE` / `AIC_SIGLIP_DEVICE` | không | `auto` \| `cuda` \| `cpu` |
 | `AIC_HF_CACHE_DIR` | không | thư mục cache HuggingFace |
 | `AIC_DISABLE_NEURAL` | không | `1` để chỉ chạy BM25 |
+| `AIC_PRELOAD` | không | thứ tự warm-up nền; `none` = lười hoàn toàn |
 
 Không hardcode đường dẫn tuyệt đối của máy nào trong code.
+
+### 4.1 Thứ tự phân giải đường dẫn
+
+Mỗi artifact được tìm theo đúng thứ tự này, **lúc nạp** chứ không phải lúc import:
+
+1. biến môi trường ở bảng trên, nếu file **thực sự tồn tại**;
+2. tải từ Hugging Face dataset (`AIC_HF_REPO_ID`, mặc định `manhha2502/fullhd`);
+3. không lấy được ⇒ nguồn đó vào trạng thái `error`, các nguồn khác vẫn chạy.
+
+Trỏ env var sai đường dẫn thì app ghi WARNING rồi mới quay sang Hugging Face —
+đọc log nếu thấy khởi động chậm bất thường.
+
+Chỉ **kết quả thành công** mới được nhớ. Một lần hụt mạng không đóng băng vĩnh
+viễn: `POST /api/components/<tên>/reload` quên đường dẫn cũ và phân giải lại.
+
+### 4.2 Khởi tạo lười và trạng thái từng thành phần
+
+`aic/core/components.py` cho mỗi thành phần nặng một `LazyComponent`: lock riêng,
+ô trạng thái riêng.
+
+```text
+disabled                    chưa cấu hình, không bao giờ gọi loader
+idle → loading → ready
+              └→ error      dính lại; chỉ reload mới thử lại
+```
+
+Ba tính chất được test khoá lại (`tests/test_component_registry.py`,
+`tests/test_ui_component_isolation.py`):
+
+- `GET /api/status` đọc ảnh chụp trạng thái, **không** chạm lock nạp — nên trả
+  lời được ngay cả lúc BM25 đang giải nén 564 MB;
+- `POST /api/translate` chỉ phụ thuộc model dịch, không kéo theo CLIP/BM25;
+- một nguồn `error` không ngăn các nguồn còn lại phục vụ `/api/search`;
+  `/api/search` chỉ trả 503 khi **không** còn nguồn nào.
+
+`AIC_PRELOAD` chỉ điều khiển warm-up nền sau khi server đã bind port. Nó không
+bao giờ chặn startup, và không đổi ngữ nghĩa nạp-theo-yêu-cầu.
 
 ---
 

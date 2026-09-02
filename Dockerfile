@@ -19,6 +19,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     AIC_INDEX_PATH=/app/local/clip_faiss.index \
     AIC_META_PATH=/app/local/clip_metadata.json \
     AIC_TEXT_INDEX_PATH=/app/data/input/input/index/text_search_index.pkl \
+    AIC_VIDEO_METADATA_PATH=/app/local/video_metadata.json \
     AIC_CLIP_DEVICE=cpu \
     AIC_TRANSLATION_DEVICE=cpu \
     AIC_ENABLE_BM25=1 \

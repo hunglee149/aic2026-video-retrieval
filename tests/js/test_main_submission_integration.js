@@ -576,3 +576,114 @@ test('Q&A confirmation accepts 100 astral characters like the Python validator',
   assert.equal(rows.length, 1);
   assert.equal(Array.from(rows[0].answer).length, 100);
 });
+
+// ---------------------------------------------------------------------------
+// Dải chip trạng thái từng thành phần
+//
+// Nửa nhìn thấy được của việc tách khởi tạo: operator phải biết thành phần nào
+// đang nạp, thành phần nào hỏng — thay vì một chấm xanh chung không nói gì.
+// ---------------------------------------------------------------------------
+
+function statusPayload(components, extra = {}) {
+  return {
+    ok: true,
+    retriever: 'clip (177,321 vectors, dim=512)',
+    loading: components.some((c) => c.state === 'loading'),
+    components,
+    retrievers: components.filter((c) => c.kind !== 'translation'),
+    ...extra,
+  };
+}
+
+function stubFetch(context, handler) {
+  const calls = [];
+  context.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { json: async () => handler(url, options) };
+  };
+  return calls;
+}
+
+test('status chips render one entry per component with its own state', async () => {
+  const { context, document } = createMainHarness();
+  stubFetch(context, () => statusPayload([
+    { name: 'translation', kind: 'translation', state: 'ready', detail: 'translation: opus-mt', error: null },
+    { name: 'clip', kind: 'retrieval', state: 'loading', detail: 'clip: đang nạp…', error: null },
+    { name: 'bm25', kind: 'retrieval', state: 'error', detail: 'bm25: nạp thất bại', error: 'không tìm thấy index' },
+    { name: 'siglip', kind: 'retrieval', state: 'disabled', detail: 'siglip: chưa cấu hình', error: null },
+  ]));
+
+  await vm.runInContext('checkStatus()', context);
+
+  const chips = document.getElementById('component-status').children;
+  assert.deepEqual(
+    chips.map((chip) => chip.className),
+    [
+      'component-chip state-ready',
+      'component-chip state-loading',
+      'component-chip state-error',
+      'component-chip state-disabled',
+    ],
+  );
+  assert.deepEqual(
+    chips.map((chip) => chip.textContent),
+    ['Dịch', 'CLIP', 'BM25', 'SigLIP'],
+  );
+});
+
+test('an errored chip explains why and offers a reload', async () => {
+  const { context, document } = createMainHarness();
+  const calls = stubFetch(context, (url) => {
+    if (url.includes('/reload')) {
+      return { ok: true, component: { name: 'bm25', state: 'ready', detail: 'bm25: 629,404 docs', error: null } };
+    }
+    return statusPayload([
+      { name: 'bm25', kind: 'retrieval', state: 'error', detail: 'bm25: nạp thất bại', error: 'không tìm thấy index' },
+    ]);
+  });
+
+  await vm.runInContext('checkStatus()', context);
+  const chip = document.getElementById('component-status').children[0];
+  assert.match(chip.title, /không tìm thấy index/);
+
+  chip.onclick();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.ok(calls.some((call) => call.url === '/api/components/bm25/reload'));
+});
+
+test('status polling tightens while a component is still loading', async () => {
+  const { context } = createMainHarness();
+  const delays = [];
+  context.setTimeout = (fn, delay) => { delays.push(delay); return 1; };
+  let loading = true;
+  stubFetch(context, () => statusPayload([
+    { name: 'clip', kind: 'retrieval', state: loading ? 'loading' : 'ready', detail: 'clip', error: null },
+  ]));
+
+  await vm.runInContext('scheduleStatusPolling()', context);
+  loading = false;
+  await vm.runInContext('scheduleStatusPolling()', context);
+
+  assert.deepEqual(delays, [3000, 30000]);
+});
+
+test('translating before the model is ready says so instead of hanging silently', async () => {
+  const { context, document } = createMainHarness();
+  stubFetch(context, (url) => {
+    if (url === '/api/status') {
+      return statusPayload([
+        { name: 'translation', kind: 'translation', state: 'idle', detail: 'translation: chưa nạp', error: null },
+      ]);
+    }
+    return { text_en: 'a man cooking', ok: true };
+  });
+
+  await vm.runInContext('checkStatus()', context);
+  document.getElementById('query-input').value = 'một người đàn ông nấu ăn';
+  await vm.runInContext('doTranslate()', context);
+
+  const toasts = document.getElementById('toast-container').children.map((t) => t.textContent);
+  assert.ok(toasts.some((text) => /Đang nạp mô hình dịch/.test(text)));
+  assert.equal(document.getElementById('translated-text').value, 'a man cooking');
+});

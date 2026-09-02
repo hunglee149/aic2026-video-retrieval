@@ -9,10 +9,11 @@ import sys
 import threading
 from functools import lru_cache
 
+from .components import LazyComponent
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "Helsinki-NLP/opus-mt-vi-en"
-_MODEL_LOAD_LOCK = threading.Lock()
 
 # Marian/OPUS-MT dựng tokenizer bằng SentencePiece. Thiếu gói này thì
 # transformers không báo "thiếu sentencepiece" mà ném ra "Unrecognized
@@ -113,12 +114,46 @@ def _load_translator(model_name: str, device: str) -> LocalTranslator:
     return LocalTranslator(model_name=model_name, device=device)
 
 
-def get_local_translator() -> LocalTranslator:
-    """Return one process-wide translator, even under concurrent first requests."""
+def _build_translator() -> tuple[LocalTranslator, str]:
+    """Loader của component: đọc env rồi uỷ quyền cho ``_load_translator``.
+
+    Việc cache thật vẫn nằm ở ``_load_translator`` (``lru_cache``) chứ không ở
+    component — nhờ vậy ``_load_translator.cache_clear()`` vẫn reset được
+    translator một cách triệt để, và ``LocalTranslator`` vẫn tra qua module global
+    nên monkeypatch trong test còn tác dụng.
+    """
     model_name = os.environ.get("AIC_TRANSLATION_MODEL", DEFAULT_MODEL)
     device = os.environ.get("AIC_TRANSLATION_DEVICE", "auto").lower()
-    with _MODEL_LOAD_LOCK:
-        return _load_translator(model_name, device)
+    translator = _load_translator(model_name, device)
+    resolved = getattr(translator, "device", device)
+    return translator, f"translation: {model_name} trên {resolved}"
+
+
+# Ô trạng thái riêng cho model dịch. Tách khỏi CLIP/BM25 để bấm "dịch" không phải
+# chờ retrieval nạp xong — đó là toàn bộ lý do module components tồn tại.
+TRANSLATOR = LazyComponent(
+    "translation",
+    _build_translator,
+    kind="translation",
+    memoize=False,
+)
+
+
+def get_local_translator() -> LocalTranslator:
+    """Return one process-wide translator, even under concurrent first requests."""
+    return TRANSLATOR.require()
+
+
+def translation_status() -> dict:
+    """Ảnh chụp trạng thái model dịch cho ``/api/status``. Không bao giờ chặn."""
+    return TRANSLATOR.snapshot()
+
+
+def reload_translator() -> dict:
+    """Thử nạp lại sau khi lỗi, khỏi phải restart server."""
+    _load_translator.cache_clear()
+    translate_text.cache_clear()
+    return TRANSLATOR.reload()
 
 
 @lru_cache(maxsize=256)

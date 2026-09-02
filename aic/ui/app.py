@@ -41,6 +41,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from ..core import local_translation
+from ..core.components import ComponentRegistry, LazyComponent
 from ..core.convert import to_answer, to_csv_row
 from ..core.local_translation import translate_text
 from ..core.query_processor import make_query
@@ -66,8 +68,19 @@ logger = logging.getLogger(__name__)
 
 KEYFRAMES_DIR = Path(os.environ.get("AIC_KEYFRAMES_DIR", "data/keyframes"))
 
-def resolve_path(remote_filename: Optional[str]) -> Optional[Path]:
-    """Tải/đọc trực tiếp file từ Hugging Face Hub cache hoặc lấy từ thư mục local."""
+def resolve_path(
+    remote_filename: Optional[str], env_var: Optional[str] = None
+) -> Optional[Path]:
+    """Đường dẫn tới artifact: env var → file sẵn có trong workspace → Hugging Face.
+
+    Thứ tự này quan trọng. Máy dev thường đã có sẵn file (pickle BM25 nặng
+    564 MB) nên tải lại từ HF là lãng phí thuần tuý. Chỉ chấp nhận env var khi
+    file **thực sự tồn tại**: trỏ sai đường dẫn mà vẫn im lặng chạy tiếp còn tệ
+    hơn là tải lại, vì lỗi sẽ nổ ở tận tầng retriever.
+
+    ``env_var`` là đường gọi tường minh của ``artifact_path()``; không truyền thì
+    tra bảng ``env_mappings`` bên dưới, để caller cũ chỉ đưa tên file vẫn đúng.
+    """
     if not remote_filename:
         return None
 
@@ -82,7 +95,7 @@ def resolve_path(remote_filename: Optional[str]) -> Optional[Path]:
     }
     
     # 1. Kiểm tra biến môi trường tương ứng
-    env_name = env_mappings.get(remote_filename)
+    env_name = env_var or env_mappings.get(remote_filename)
     if env_name:
         env_val = os.environ.get(env_name, "").strip()
         if env_val:
@@ -106,11 +119,23 @@ def resolve_path(remote_filename: Optional[str]) -> Optional[Path]:
     cache_dir = os.environ.get("AIC_HF_CACHE_DIR") or None
     try:
         from huggingface_hub import hf_hub_download
-        import sys
+
         is_mocked = hasattr(hf_hub_download, "mock_add_spec") or hf_hub_download.__class__.__name__ in ("MagicMock", "Mock")
-        if ("pytest" in sys.modules or "unittest" in sys.modules) and not is_mocked:
+        # Chốt chặn để test không lỡ tải 564 MB thật. Trước đây điều kiện là
+        # `"pytest" in sys.modules or "unittest" in sys.modules`, mà `unittest`
+        # bị import gián tiếp bởi thư viện khác ngay trong server production —
+        # đo được trên chính server đang chạy — nên nhánh này từng chạy ở
+        # production và trả về `local/<tên file>` bịa ra. Kết quả là log báo
+        # "không tìm thấy local/text_search_index.pkl" trong khi sự thật là
+        # không tải được từ HF. Dùng biến môi trường pytest tự đặt thì chính xác.
+        in_tests = bool(os.environ.get("PYTEST_CURRENT_TEST")) or (
+            os.environ.get("AIC_SKIP_HF_DOWNLOAD", "0") == "1"
+        )
+        if in_tests and not is_mocked:
             logger.info("Test environment detected. Skipping real HF download for %s", remote_filename)
-            return Path("local") / remote_filename.split("/")[-1]
+            # Trả None chứ không bịa đường dẫn: nguồn dùng nó sẽ báo "không phân
+            # giải được artifact", đúng nguyên nhân thật.
+            return None
 
         logger.info("Đang kiểm tra/tải file %s từ HF repo %s (revision: %s)...", remote_filename, repo_id, revision)
         cached_path = hf_hub_download(
@@ -125,9 +150,83 @@ def resolve_path(remote_filename: Optional[str]) -> Optional[Path]:
         logger.error("Lỗi khi tải file %s từ Hugging Face: %s", remote_filename, e)
         raise e
 
-INDEX_PATH = resolve_path("local/clip_faiss.index")
-META_PATH = resolve_path("local/clip_metadata.json")
-TEXT_INDEX_PATH = resolve_path("data/input/input/index/text_search_index.pkl")
+# Khai báo artifact: tên logic → (env var, đường dẫn trong HF dataset).
+# KHÔNG phân giải ở đây. resolve_path() gọi hf_hub_download đồng bộ, mà module này
+# được import trước khi uvicorn bind port — phân giải lúc import nghĩa là server
+# chưa tồn tại thì đã tải xong hàng GB.
+_ARTIFACTS: dict[str, tuple[str, str]] = {
+    "clip_index": ("AIC_INDEX_PATH", "local/clip_faiss.index"),
+    "clip_meta": ("AIC_META_PATH", "local/clip_metadata.json"),
+    "text_index": (
+        "AIC_TEXT_INDEX_PATH",
+        "data/input/input/index/text_search_index.pkl",
+    ),
+    "siglip_index": (
+        "AIC_SIGLIP_INDEX_PATH",
+        "data/input/input/index/siglip_faiss.index",
+    ),
+    "siglip_meta": (
+        "AIC_SIGLIP_META_PATH",
+        "data/input/input/index/siglip_metadata.json",
+    ),
+    "video_metadata": ("AIC_VIDEO_METADATA_PATH", "local/video_metadata.json"),
+}
+
+
+# Chỉ nhớ lần phân giải **thành công**. Nhớ cả thất bại thì một lần HF hụt mạng
+# sẽ đóng băng vĩnh viễn, và ngay cả /api/components/<tên>/reload cũng vô dụng.
+_artifact_cache: dict[str, Path] = {}
+
+
+def artifact_path(key: str) -> Optional[Path]:
+    """Phân giải artifact theo yêu cầu, không bao giờ ném lúc import.
+
+    Trả ``None`` khi không lấy được — nguồn dùng nó sẽ báo ``error`` riêng chứ
+    không kéo sập các nguồn khác.
+    """
+    cached = _artifact_cache.get(key)
+    if cached is not None:
+        return cached
+
+    env_var, remote = _ARTIFACTS[key]
+    try:
+        path = resolve_path(remote, env_var)
+    except Exception as exc:
+        logger.error("Không phân giải được artifact %s: %s", key, exc)
+        return None
+    if path is not None:
+        _artifact_cache[key] = path
+    return path
+
+
+def reset_artifact_cache(key: Optional[str] = None) -> None:
+    """Quên đường dẫn đã nhớ, để lần reload sau phân giải lại từ đầu."""
+    if key is None:
+        _artifact_cache.clear()
+    else:
+        _artifact_cache.pop(key, None)
+
+
+def artifact_source(key: str) -> str:
+    """Mô tả nguồn cấu hình, **không** phát sinh I/O — dùng cho /api/status."""
+    env_var, remote = _ARTIFACTS[key]
+    raw = os.environ.get(env_var, "").strip()
+    if raw:
+        return raw
+    repo_id = os.environ.get("AIC_HF_REPO_ID", "manhha2502/fullhd")
+    return f"hf://{repo_id}/{remote}"
+
+
+def clip_index_path() -> Optional[Path]:
+    return artifact_path("clip_index")
+
+
+def clip_meta_path() -> Optional[Path]:
+    return artifact_path("clip_meta")
+
+
+def text_index_path() -> Optional[Path]:
+    return artifact_path("text_index")
 
 
 def _optional_path(name: str) -> Optional[Path]:
@@ -138,27 +237,33 @@ def _optional_path(name: str) -> Optional[Path]:
 
 MAP_KEYFRAMES_DIR = _optional_path("AIC_MAP_KEYFRAMES_DIR")
 
-if os.environ.get("AIC_USE_SIGLIP", "0") == "1":
-    SIGLIP_INDEX_PATH = resolve_path("data/input/input/index/siglip_faiss.index")
-    SIGLIP_META_PATH = resolve_path("data/input/input/index/siglip_metadata.json")
-else:
-    SIGLIP_INDEX_PATH = None
-    SIGLIP_META_PATH = None
+def _siglip_enabled() -> bool:
+    return os.environ.get("AIC_USE_SIGLIP", "0") == "1"
+
+
+def siglip_index_path() -> Optional[Path]:
+    return artifact_path("siglip_index") if _siglip_enabled() else None
+
+
+def siglip_meta_path() -> Optional[Path]:
+    return artifact_path("siglip_meta") if _siglip_enabled() else None
 
 USE_DUMMY = os.environ.get("AIC_USE_DUMMY", "0") == "1"
 DISABLE_NEURAL = os.environ.get("AIC_DISABLE_NEURAL", "0").strip() == "1"
 
 AIC_USE_CLOUD_MEDIA = os.environ.get("AIC_USE_CLOUD_MEDIA", "1") == "1"
 HF_DATASET_URL = os.environ.get("AIC_HF_DATASET_URL", "https://huggingface.co/datasets/manhha2502/fullhd/resolve/main")
-VIDEO_METADATA_PATH = resolve_path("local/video_metadata.json")
 _video_metadata = {}
 
 def load_video_metadata():
     global _video_metadata
-    if not _video_metadata and VIDEO_METADATA_PATH and VIDEO_METADATA_PATH.exists():
+    if _video_metadata:
+        return _video_metadata
+    path = artifact_path("video_metadata")
+    if path and path.exists():
         try:
             import json
-            with open(VIDEO_METADATA_PATH, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 _video_metadata = json.load(f)
             logger.info("Loaded video metadata with %d mappings", len(_video_metadata))
         except Exception as e:
@@ -171,19 +276,39 @@ def load_video_metadata():
 
 from contextlib import asynccontextmanager
 
+DEFAULT_PRELOAD_ORDER = ("translation", "clip", "bm25", "siglip")
+
+
+def preload_order() -> tuple[str, ...]:
+    """Thứ tự warm-up từ ``AIC_PRELOAD``.
+
+    Mặc định nạp translation trước: operator bấm "dịch" trước khi bấm "tìm", nên
+    đó là thành phần đáng ấm sớm nhất. ``none`` = lười hoàn toàn.
+    """
+    raw = os.environ.get("AIC_PRELOAD", "").strip()
+    if not raw or raw.lower() == "all":
+        return DEFAULT_PRELOAD_ORDER
+    if raw.lower() == "none":
+        return ()
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import sys
-    logger.info("Preloading retrievers...")
-    _ensure_retrievers()
 
-    if "pytest" not in sys.modules and "unittest" not in sys.modules:
-        logger.info("Preloading translation model...")
-        try:
-            from ..core.local_translation import get_local_translator
-            get_local_translator()
-        except Exception as e:
-            logger.warning("Failed to preload translation model: %s", e)
+    # Không nạp gì trước `yield`. Trước đây chỗ này nạp CLIP + BM25 + model dịch
+    # đồng bộ, nên server không phục vụ nổi một request nào — kể cả /api/status —
+    # cho tới khi cả ba xong. Giờ chỉ khởi động một thread warm-up chạy nền.
+    registry = get_registry()
+    in_tests = "pytest" in sys.modules or "unittest" in sys.modules
+    if not in_tests or os.environ.get("AIC_FORCE_PRELOAD") == "1":
+        order = preload_order()
+        if order:
+            logger.info("Warm-up nền theo thứ tự: %s", ", ".join(order))
+            registry.warm_up(order)
+        else:
+            logger.info("AIC_PRELOAD=none — mọi thành phần nạp theo yêu cầu")
     yield
 
 
@@ -329,9 +454,8 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 import threading
 
-_retrievers: list = []
-_retriever_status: list[dict] = []
-_retriever_lock = threading.Lock()
+_registry: Optional[ComponentRegistry] = None
+_registry_lock = threading.Lock()
 
 
 def _slot(name: str, state: str, detail: str, error: Optional[str] = None) -> dict:
@@ -368,33 +492,22 @@ def _load_source(name: str, paths, factory, disabled_reason: Optional[str] = Non
     return retriever, _slot(name, "ready", detail)
 
 
-def build_retriever_registry(
+def _source_specs(
     *,
-    use_dummy: bool,
     clip_index,
     clip_meta,
     siglip_index,
     siglip_meta,
     text_index,
-    dummy_module,
     disable_neural: bool = False,
-):
-    """Dựng danh sách retriever + trạng thái từng nguồn. Hàm thuần, dễ test."""
-    if use_dummy:
-        logger.info("AIC_USE_DUMMY=1 — dùng dummy retrieval")
-        # detail giữ đúng chuỗi "dummy": UI dùng `data.retriever === 'dummy'`
-        # để bật badge demo, đổi chuỗi này là làm hỏng chỉ báo đó.
-        return [dummy_module], [_slot("dummy", "ready", "dummy")]
+) -> list[tuple]:
+    """Khai báo các nguồn retrieval: ``(name, paths, factory, disabled_reason)``.
 
+    Một chỗ khai báo duy nhất, hai cách dùng: ``build_retriever_registry()`` nạp
+    hết ngay (dùng cho script eval và test contract), còn app dựng mỗi spec thành
+    một ``LazyComponent`` nạp riêng.
+    """
     neural_off = "AIC_DISABLE_NEURAL=1" if disable_neural else None
-    retrievers: list = []
-    statuses: list[dict] = []
-
-    def register(name, paths, factory, disabled_reason=None):
-        retriever, slot = _load_source(name, paths, factory, disabled_reason)
-        if retriever is not None:
-            retrievers.append(retriever)
-        statuses.append(slot)
 
     def _clip_factory():
         from ..retrieval.clip import build_clip_retriever
@@ -411,9 +524,51 @@ def build_retriever_registry(
 
         return TextRetriever(text_index, name="bm25")
 
-    register("clip", (clip_index, clip_meta), _clip_factory, neural_off)
-    register("siglip", (siglip_index, siglip_meta), _siglip_factory, neural_off)
-    register("bm25", (text_index,), _text_factory)
+    return [
+        ("clip", (clip_index, clip_meta), _clip_factory, neural_off),
+        ("siglip", (siglip_index, siglip_meta), _siglip_factory, neural_off),
+        ("bm25", (text_index,), _text_factory, None),
+    ]
+
+
+def build_retriever_registry(
+    *,
+    use_dummy: bool,
+    clip_index,
+    clip_meta,
+    siglip_index,
+    siglip_meta,
+    text_index,
+    dummy_module,
+    disable_neural: bool = False,
+):
+    """Dựng danh sách retriever + trạng thái từng nguồn. Hàm thuần, dễ test.
+
+    Nạp hết ngay lập tức. Đường chạy của server **không** dùng hàm này nữa (xem
+    ``_build_component_registry``); nó còn ở đây cho ``scripts/eval_retrieval.py``
+    và các test contract, nơi nạp đồng bộ mới là hành vi mong muốn.
+    """
+    if use_dummy:
+        logger.info("AIC_USE_DUMMY=1 — dùng dummy retrieval")
+        # detail giữ đúng chuỗi "dummy": UI dùng `data.retriever === 'dummy'`
+        # để bật badge demo, đổi chuỗi này là làm hỏng chỉ báo đó.
+        return [dummy_module], [_slot("dummy", "ready", "dummy")]
+
+    retrievers: list = []
+    statuses: list[dict] = []
+    specs = _source_specs(
+        clip_index=clip_index,
+        clip_meta=clip_meta,
+        siglip_index=siglip_index,
+        siglip_meta=siglip_meta,
+        text_index=text_index,
+        disable_neural=disable_neural,
+    )
+    for name, paths, factory, disabled_reason in specs:
+        retriever, slot = _load_source(name, paths, factory, disabled_reason)
+        if retriever is not None:
+            retrievers.append(retriever)
+        statuses.append(slot)
 
     if not retrievers:
         logger.error(
@@ -422,30 +577,147 @@ def build_retriever_registry(
     return retrievers, statuses
 
 
-def _ensure_retrievers():
-    global _retrievers, _retriever_status
-    with _retriever_lock:
-        if _retriever_status:
-            return _retrievers, _retriever_status
-        _retrievers, _retriever_status = build_retriever_registry(
-            use_dummy=USE_DUMMY,
-            clip_index=INDEX_PATH,
-            clip_meta=META_PATH,
-            siglip_index=SIGLIP_INDEX_PATH,
-            siglip_meta=SIGLIP_META_PATH,
-            text_index=TEXT_INDEX_PATH,
-            dummy_module=dummy,
-            disable_neural=DISABLE_NEURAL,
+# ---------------------------------------------------------------------------
+# Registry lười — mỗi nguồn một ô trạng thái và một lock riêng
+# ---------------------------------------------------------------------------
+
+
+# Thành phần nào dùng artifact nào — để reload biết phải quên cache đường dẫn nào.
+_COMPONENT_ARTIFACTS: dict[str, tuple[str, ...]] = {
+    "clip": ("clip_index", "clip_meta"),
+    "siglip": ("siglip_index", "siglip_meta"),
+    "bm25": ("text_index",),
+    "keyframe_map": ("clip_meta", "siglip_meta"),
+}
+
+
+class SourceUnavailable(RuntimeError):
+    """Nguồn có cấu hình nhưng không nạp được — trạng thái ``error``."""
+
+
+def _component_loader(name, enabled_fn, paths_fn, factory_fn, disabled_reason):
+    """Loader của một LazyComponent: phân giải path rồi mới nạp.
+
+    Path được phân giải **bên trong** loader, nên thời gian tải artifact từ HF
+    tính vào đúng nguồn đó, và lỗi tải cũng chỉ làm hỏng đúng nguồn đó.
+
+    Trả ``None`` = disabled (không cấu hình, đừng nạp). Ném ``SourceUnavailable``
+    = error (có cấu hình nhưng hỏng). Hai trường hợp này phải phân biệt được:
+    SigLIP tắt là bình thường, còn CLIP tải hụt là sự cố cần báo.
+    """
+
+    def _load():
+        if not enabled_fn():
+            return None, None
+        if disabled_reason:
+            return None, None
+
+        paths = paths_fn()
+        if any(path is None for path in paths):
+            raise SourceUnavailable(
+                f"không phân giải được artifact cho {name} "
+                f"(kiểm tra env hoặc kết nối Hugging Face)"
+            )
+
+        retriever, slot = _load_source(name, paths, factory_fn(paths), None)
+        if retriever is None:
+            raise SourceUnavailable(slot["error"] or slot["detail"])
+        return retriever, slot["detail"]
+
+    return _load
+
+
+def _build_component_registry() -> ComponentRegistry:
+    """Registry thật của server: translation + từng nguồn retrieval, tất cả đều lười."""
+    registry = ComponentRegistry()
+    registry.add(local_translation.TRANSLATOR)
+    # kind="media": phục vụ hiển thị ảnh, không phải nguồn retrieval — nên không
+    # được lọt vào `retrievers` hay `ready_count` của /api/status.
+    registry.add(
+        LazyComponent("keyframe_map", _build_frame_index, kind="media")
+    )
+
+    if USE_DUMMY:
+        logger.info("AIC_USE_DUMMY=1 — dùng dummy retrieval")
+        # Dummy nạp tức thì (chi phí bằng 0) để detail giữ đúng chuỗi "dummy" mà
+        # UI dựa vào để bật badge demo.
+        component = LazyComponent("dummy", lambda: (dummy, "dummy"))
+        component.get()
+        registry.add(component)
+        return registry
+
+    neural_off = "AIC_DISABLE_NEURAL=1" if DISABLE_NEURAL else None
+
+    def _clip_factory(paths):
+        def _make():
+            from ..retrieval.clip import build_clip_retriever
+
+            return build_clip_retriever(*paths)
+
+        return _make
+
+    def _siglip_factory(paths):
+        def _make():
+            from ..retrieval.siglip import build_siglip_retriever
+
+            return build_siglip_retriever(*paths)
+
+        return _make
+
+    def _text_factory(paths):
+        def _make():
+            from ..retrieval.text_retriever import TextRetriever
+
+            return TextRetriever(paths[0], name="bm25")
+
+        return _make
+
+    sources = [
+        (
+            "clip",
+            lambda: True,
+            lambda: (clip_index_path(), clip_meta_path()),
+            _clip_factory,
+            neural_off,
+        ),
+        (
+            "siglip",
+            _siglip_enabled,
+            lambda: (siglip_index_path(), siglip_meta_path()),
+            _siglip_factory,
+            neural_off,
+        ),
+        ("bm25", lambda: True, lambda: (text_index_path(),), _text_factory, None),
+    ]
+    for name, enabled_fn, paths_fn, factory, disabled_reason in sources:
+        registry.add(
+            LazyComponent(
+                name,
+                _component_loader(name, enabled_fn, paths_fn, factory, disabled_reason),
+                disabled_reason=disabled_reason
+                or (None if enabled_fn() else "chưa cấu hình"),
+            )
         )
-        return _retrievers, _retriever_status
+    return registry
+
+
+def get_registry() -> ComponentRegistry:
+    """Registry dùng chung, dựng một lần, không nạp gì cả."""
+    global _registry
+    if _registry is None:
+        with _registry_lock:
+            if _registry is None:
+                _registry = _build_component_registry()
+    return _registry
 
 
 def get_retrievers():
-    return _ensure_retrievers()[0]
+    """Nạp theo yêu cầu và trả về những nguồn nạp được. Nguồn lỗi bị bỏ qua."""
+    return get_registry().ready_values(kind="retrieval")
 
 
 def get_retriever_status() -> list[dict]:
-    return _ensure_retrievers()[1]
+    return get_registry().snapshot_all(kind="retrieval")
 
 
 # ---------------------------------------------------------------------------
@@ -631,12 +903,20 @@ def import_query_pack_texts(req: QueryPackTextsRequest):
 
 @app.get("/api/status")
 def status():
-    """Trạng thái từng nguồn retrieval + đường dẫn logical đang dùng."""
-    statuses = get_retriever_status()
+    """Trạng thái từng thành phần + nguồn cấu hình đang dùng.
+
+    Không bao giờ chặn: mọi số liệu ở đây đọc từ ảnh chụp trạng thái, không đụng
+    vào lock nạp, nên hỏi được ngay cả lúc CLIP hay BM25 đang nạp dở.
+    """
+    registry = get_registry()
+    components = registry.snapshot_all()
+    statuses = registry.snapshot_all(kind="retrieval")
     ready = [s for s in statuses if s["state"] == "ready"]
 
     if ready:
         summary = " + ".join(s["detail"] for s in ready)
+    elif any(s["state"] == "loading" for s in components):
+        summary = "đang nạp…"
     else:
         summary = "không có nguồn retrieval nào sẵn sàng"
 
@@ -644,17 +924,43 @@ def status():
         "ok": True,
         "retriever": summary,
         "retrievers": statuses,
+        "components": components,
+        "translation": local_translation.translation_status(),
+        "loading": registry.is_loading(),
         "ready_count": len(ready),
         "keyframes_dir": str(KEYFRAMES_DIR),
         "use_dummy": USE_DUMMY,
         "paths": {
-            "clip_index": str(INDEX_PATH),
-            "clip_meta": str(META_PATH),
-            "siglip_index": str(SIGLIP_INDEX_PATH) if SIGLIP_INDEX_PATH else None,
-            "siglip_meta": str(SIGLIP_META_PATH) if SIGLIP_META_PATH else None,
-            "text_index": str(TEXT_INDEX_PATH),
+            "clip_index": artifact_source("clip_index"),
+            "clip_meta": artifact_source("clip_meta"),
+            "siglip_index": artifact_source("siglip_index") if _siglip_enabled() else None,
+            "siglip_meta": artifact_source("siglip_meta") if _siglip_enabled() else None,
+            "text_index": artifact_source("text_index"),
         },
     }
+
+
+@app.post("/api/components/{name}/reload")
+def reload_component(name: str):
+    """Thử nạp lại một thành phần đang lỗi, khỏi phải restart server.
+
+    Trạng thái ``error`` cố tình dính lại: một nguồn hỏng hẳn mà tự thử lại mỗi
+    request thì mọi lần search đều gánh thêm một lần timeout. Đây là lối thoát.
+    """
+    if name == "translation":
+        return {"ok": True, "component": local_translation.reload_translator()}
+
+    component = get_registry().get(name)
+    if component is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Không có thành phần tên {name!r}",
+        )
+    # Quên cả đường dẫn đã nhớ: nếu lần trước hụt vì mạng thì phải tải lại,
+    # không phải chỉ dựng lại retriever trên cùng một path hỏng.
+    for artifact_key in _COMPONENT_ARTIFACTS.get(name, ()):
+        reset_artifact_cache(artifact_key)
+    return {"ok": True, "component": component.reload()}
 
 
 @app.post("/api/translate")
@@ -720,68 +1026,112 @@ def search(req: SearchRequest):
     }
 
 
-_frame_to_n = None
+class FrameIndex:
+    """Tra ``(video_id, frame_idx) → keyframe_num`` cho việc hiển thị ảnh.
 
-def _get_frame_mapping():
-    global _frame_to_n
-    if _frame_to_n is not None:
-        return _frame_to_n
-    
-    mapping = {}
-    if META_PATH and META_PATH.exists():
+    Giữ luôn danh sách frame theo từng video, dựng **một lần** cùng lượt đọc
+    metadata. Trước đây danh sách này được dựng lười trong request bằng cách quét
+    toàn bộ 176k khoá cho mỗi video — mỗi video một lần quét.
+    """
+
+    __slots__ = ("mapping", "by_video")
+
+    def __init__(self, mapping: dict, by_video: dict):
+        self.mapping = mapping
+        self.by_video = by_video
+
+    def __len__(self) -> int:
+        return len(self.mapping)
+
+    def describe(self) -> str:
+        return f"keyframe_map: {len(self.mapping):,} keyframe / {len(self.by_video)} video"
+
+    def keyframe_num(self, video_id: str, frame_idx: int):
+        """Khớp chính xác, không có thì lấy keyframe gần nhất của cùng video.
+
+        Frame_idx có thể do operator sửa tay nên không rơi đúng keyframe nào;
+        hiển thị ảnh gần nhất vẫn hữu ích hơn một ô xám.
+        """
+        exact = self.mapping.get((video_id, frame_idx))
+        if exact is not None:
+            return exact
+        frames = self.by_video.get(video_id)
+        if not frames:
+            return None
+        closest = min(frames, key=lambda x: abs(x - frame_idx))
+        return self.mapping.get((video_id, closest))
+
+
+EMPTY_FRAME_INDEX = FrameIndex({}, {})
+
+
+def _read_keyframe_metadata(path: Path) -> tuple[dict, dict]:
+    import json
+
+    with open(path, "r", encoding="utf-8") as handle:
+        metadata = json.load(handle)
+
+    mapping: dict = {}
+    by_video: dict[str, list[int]] = {}
+    for meta in metadata:
+        vid = meta.get("video_id")
+        fidx = meta.get("frame_idx")
+        n = meta.get("keyframe_num")
+        if vid is None or fidx is None or n is None:
+            continue
+        mapping[(vid, fidx)] = n
+        by_video.setdefault(vid, []).append(fidx)
+    for frames in by_video.values():
+        frames.sort()
+    return mapping, by_video
+
+
+def _build_frame_index() -> tuple[FrameIndex, str]:
+    """Loader của component ``keyframe_map``.
+
+    Ném ``SourceUnavailable`` khi không đọc được nguồn nào. Trước đây lỗi bị nuốt
+    và hàm trả về dict rỗng, nên operator chỉ thấy ảnh placeholder xám mà không
+    có chỗ nào nói vì sao.
+    """
+    reasons = []
+    for label, path in (("clip", clip_meta_path()), ("siglip", siglip_meta_path())):
+        if path is None:
+            reasons.append(f"{label}: chưa phân giải được metadata")
+            continue
+        if not path.exists():
+            reasons.append(f"{label}: không thấy {path}")
+            continue
         try:
-            import json
-            with open(META_PATH, "r", encoding="utf-8") as f:
-                metadata = json.load(f)
-            for meta in metadata:
-                vid = meta.get("video_id")
-                fidx = meta.get("frame_idx")
-                n = meta.get("keyframe_num")
-                if vid is not None and fidx is not None and n is not None:
-                    mapping[(vid, fidx)] = n
-            logger.info("Loaded frame mapping with %d items from %s", len(mapping), META_PATH)
-        except Exception as e:
-            logger.warning("Error loading metadata for frame mapping: %s", e)
+            mapping, by_video = _read_keyframe_metadata(path)
+        except Exception as exc:
+            reasons.append(f"{label}: {type(exc).__name__}: {exc}")
+            continue
+        if mapping:
+            index = FrameIndex(mapping, by_video)
+            logger.info("Frame index từ %s — %s", path, index.describe())
+            return index, index.describe()
+        reasons.append(f"{label}: {path} không có keyframe_num nào")
 
-    if not mapping and SIGLIP_META_PATH and SIGLIP_META_PATH.exists():
-        try:
-            import json
-            with open(SIGLIP_META_PATH, "r", encoding="utf-8") as f:
-                metadata = json.load(f)
-            for meta in metadata:
-                vid = meta.get("video_id")
-                fidx = meta.get("frame_idx")
-                n = meta.get("keyframe_num")
-                if vid is not None and fidx is not None and n is not None:
-                    mapping[(vid, fidx)] = n
-            logger.info("Loaded frame mapping with %d items from %s (SigLIP)", len(mapping), SIGLIP_META_PATH)
-        except Exception as e:
-            logger.warning("Error loading SigLIP metadata for frame mapping: %s", e)
-
-    _frame_to_n = mapping
-    return _frame_to_n
+    raise SourceUnavailable("; ".join(reasons) or "không có nguồn metadata keyframe")
 
 
-_video_fidx_cache = {}
+def get_frame_index() -> FrameIndex:
+    """Frame index dùng chung, nạp một lần duy nhất kể cả khi nhiều request đến cùng lúc."""
+    component = get_registry().get("keyframe_map")
+    if component is None:
+        return EMPTY_FRAME_INDEX
+    return component.get() or EMPTY_FRAME_INDEX
+
+
+def _get_frame_mapping() -> dict:
+    """Giữ lại cho các chỗ chỉ cần dict thô (ví dụ ``/api/videos``)."""
+    return get_frame_index().mapping
 
 
 @app.get("/api/keyframe/{video_id}/{frame_idx}")
 def get_keyframe(video_id: str, frame_idx: int):
     """Trả về ảnh keyframe (từ local hoặc redirect tới cloud R2/HF)."""
-    mapping = _get_frame_mapping()
-    n = mapping.get((video_id, frame_idx))
-    
-    # Nếu không có keyframe khớp chính xác (do frame_idx bị chỉnh sửa thủ công),
-    # tìm keyframe gần nhất của video này để tránh hiển thị ảnh lỗi.
-    if n is None and mapping:
-        global _video_fidx_cache
-        if video_id not in _video_fidx_cache:
-            _video_fidx_cache[video_id] = [fidx for (vid, fidx) in mapping.keys() if vid == video_id]
-        
-        v_keys = _video_fidx_cache[video_id]
-        if v_keys:
-            closest_fidx = min(v_keys, key=lambda x: abs(x - frame_idx))
-            n = mapping.get((video_id, closest_fidx))
+    n = get_frame_index().keyframe_num(video_id, frame_idx)
 
     if AIC_USE_CLOUD_MEDIA:
         if n is not None:

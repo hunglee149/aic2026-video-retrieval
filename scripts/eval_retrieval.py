@@ -100,11 +100,11 @@ def build_retrievers(disable: set[str]):
 
     retrievers, statuses = app_module.build_retriever_registry(
         use_dummy=False,
-        clip_index=app_module.INDEX_PATH,
-        clip_meta=app_module.META_PATH,
-        siglip_index=app_module.SIGLIP_INDEX_PATH,
-        siglip_meta=app_module.SIGLIP_META_PATH,
-        text_index=app_module.TEXT_INDEX_PATH,
+        clip_index=app_module.clip_index_path(),
+        clip_meta=app_module.clip_meta_path(),
+        siglip_index=app_module.siglip_index_path(),
+        siglip_meta=app_module.siglip_meta_path(),
+        text_index=app_module.text_index_path(),
         dummy_module=None,
         disable_neural=app_module.DISABLE_NEURAL,
     )

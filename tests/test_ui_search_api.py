@@ -224,10 +224,33 @@ class TestStatusEndpoint:
         assert body["retrievers"]
         entry = body["retrievers"][0]
         assert set(entry) >= {"name", "state", "detail"}
-        assert entry["state"] in {"disabled", "loading", "ready", "error"}
+        assert entry["state"] in {"disabled", "idle", "loading", "ready", "error"}
 
     def test_status_keeps_legacy_retriever_string(self, client):
         body = client.get("/api/status").json()
 
         assert isinstance(body["retriever"], str)
         assert body["retriever"]
+
+    def test_status_lists_translation_alongside_retrieval(self, client):
+        """Model dịch phải có ô trạng thái riêng, không lẫn vào retrieval."""
+        body = client.get("/api/status").json()
+
+        by_name = {c["name"]: c for c in body["components"]}
+        assert "translation" in by_name
+        assert by_name["translation"]["kind"] == "translation"
+        assert body["translation"]["name"] == "translation"
+        # Và không được lọt vào danh sách nguồn retrieval.
+        assert "translation" not in {r["name"] for r in body["retrievers"]}
+
+    def test_status_reports_whether_anything_is_loading(self, client):
+        body = client.get("/api/status").json()
+
+        assert body["loading"] is False
+
+    def test_status_paths_describe_source_without_io(self, client):
+        """paths phải mô tả được nguồn cấu hình mà không phát sinh tải file."""
+        body = client.get("/api/status").json()
+
+        assert body["paths"]["clip_index"]
+        assert body["paths"]["text_index"]
