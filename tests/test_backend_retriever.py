@@ -23,17 +23,18 @@ def test_resolve_path_success(mock_hf_download):
             "AIC_INDEX_PATH": "",
         },
     ):
-        sys.modules.pop("aic.ui.app", None)
-        from aic.ui.app import resolve_path
-        res = resolve_path("local/clip_faiss.index")
-        assert res == Path("/mock/cached/path")
-        mock_hf_download.assert_any_call(
-            repo_id="manhha2502/fullhd",
-            filename="local/clip_faiss.index",
-            revision="main",
-            repo_type="dataset",
-            cache_dir=None
-        )
+        with patch.object(Path, "exists", return_value=False):
+            sys.modules.pop("aic.ui.app", None)
+            from aic.ui.app import resolve_path
+            res = resolve_path("local/clip_faiss.index")
+            assert res == Path("/mock/cached/path")
+            mock_hf_download.assert_any_call(
+                repo_id="manhha2502/fullhd",
+                filename="local/clip_faiss.index",
+                revision="main",
+                repo_type="dataset",
+                cache_dir=None
+            )
 
 def test_get_frame_mapping_direct():
     import json

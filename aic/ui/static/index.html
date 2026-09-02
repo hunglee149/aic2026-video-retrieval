@@ -4,8 +4,7 @@
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>AIC 2026 — Video Retrieval</title>
-  <meta name="description" content="Hệ thống tìm kiếm sự kiện trong video cho AI Challenge HCMC 2026"/>
-  <link rel="stylesheet" href="/static/style.css?v=11"/>
+  <link rel="stylesheet" href="/static/style.css?v=12"/>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>"/>
 </head>
 <body>
@@ -36,7 +35,6 @@
     <button id="btn-clear-cache" onclick="clearAllCache()" style="margin-right: 12px; background: rgba(239,68,68,0.15); border: 1px solid rgba(239,68,68,0.35); color: var(--red); height: 28px; padding: 0 10px; font-size: 11px; display: inline-flex; align-items: center; gap: 4px; cursor: pointer; border-radius: var(--radius-md); font-weight: 600; transition: var(--transition);">
       Xóa Cache
     </button>
-    <div class="component-status" id="component-status"></div>
     <div class="status-pill" id="status-pill">
       <div class="status-dot" id="status-dot"></div>
       <span id="status-text">Đang kết nối...</span>
@@ -137,6 +135,9 @@
         </div>
       </section>
 
+      <!-- Resizer handle -->
+      <div class="resizer" id="detail-resizer" title="Kéo để điều chỉnh độ rộng khung chi tiết"></div>
+
       <!-- RIGHT: Detail panel -->
       <aside id="detail-panel">
         <div class="detail-header">
@@ -189,9 +190,28 @@
 
             <!-- Answer (Q&A only) -->
             <div class="detail-section" id="answer-section" style="display:none">
-              <div class="detail-section-title">Câu trả lời (Q&amp;A)</div>
-              <textarea id="answer-input" placeholder="Nhập câu trả lời..."></textarea>
+              <div class="detail-section-title" style="display:flex;justify-content:space-between;align-items:center;">
+                <span>Câu trả lời (Q&amp;A)</span>
+                <span class="badge badge-cyan" id="qa-model-badge">AI Assistant</span>
+              </div>
+              
+              <!-- AI VLM Toolbar -->
+              <div class="ai-qa-toolbar" style="margin-bottom:8px; display:flex; flex-direction:column; gap:6px;">
+                <div style="display:flex; gap:6px; align-items:center;">
+                  <select id="qa-provider-select" style="flex:1; padding:5px 8px; font-size:11px; background:var(--bg-panel); border:1px solid var(--border); border-radius:var(--radius-sm); color:var(--text-primary); outline:none;">
+                    <option value="gemini">⚡ Cloud: Gemini Flash (Nhanh)</option>
+                    <option value="local">🧠 Local: Qwen3-VL Thinking (Offline)</option>
+                  </select>
+                  <button type="button" class="btn btn-sm btn-primary" id="btn-ai-qa" onclick="doAIVQA()" style="font-size:11px; padding:5px 10px; width:auto;">
+                    🤖 AI Trả lời
+                  </button>
+                </div>
+                <div id="qa-thinking-box" style="display:none; font-size:11px; color:var(--text-secondary); background:rgba(124,58,237,0.08); border:1px solid rgba(124,58,237,0.2); border-radius:var(--radius-sm); padding:6px 8px; max-height:80px; overflow-y:auto; font-style:italic;"></div>
+              </div>
+
+              <textarea id="answer-input" placeholder="Nhập câu trả lời hoặc bấm [AI Trả lời]..."></textarea>
             </div>
+
 
             <!-- Confirm button -->
             <div class="detail-section">
@@ -669,8 +689,7 @@
 
 <!-- Toast container -->
 <div id="toast-container"></div>
-
-<script src="/static/submission_helpers.js?v=3"></script>
-<script src="/static/main.js?v=12"></script>
+<script src="/static/submission_helpers.js?v=11"></script>
+<script src="/static/main.js?v=13"></script>
 </body>
 </html>

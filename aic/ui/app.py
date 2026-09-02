@@ -1362,6 +1362,137 @@ def export_submission(req: ExportRequest):
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Task 2 AI VQA Endpoint
+# ---------------------------------------------------------------------------
+
+class QARequest(BaseModel):
+    question: str
+    video_id: str
+    frame_ids: list[int] = []
+    provider: str = "gemini"
+    api_key: Optional[str] = None
+
+
+def _resolve_keyframe_image(video_id: str, frame_idx: int):
+    """Resolves keyframe image from local path, ZIP archive, or cloud fallback."""
+    import io
+    import zipfile
+    from PIL import Image
+    import urllib.request
+
+    # 1. Local loose file
+    local_candidates = [
+        KEYFRAMES_DIR / video_id / f"{frame_idx:03d}.jpg",
+        KEYFRAMES_DIR / video_id / f"{frame_idx:06d}.jpg",
+        KEYFRAMES_DIR / video_id / f"{frame_idx}.jpg",
+        Path("keyframes") / video_id / f"{frame_idx:03d}.jpg",
+        Path("keyframes") / video_id / f"{frame_idx:06d}.jpg",
+    ]
+    for p in local_candidates:
+        if p.exists():
+            return Image.open(p).convert("RGB")
+
+    # 2. Local ZIP files
+    prefix = video_id.split("_")[0]
+    zip_candidates = [
+        KEYFRAMES_DIR / f"Keyframes_{prefix}.zip",
+        KEYFRAMES_DIR / f"Keyframes_{prefix}_a.zip",
+        KEYFRAMES_DIR / f"Keyframes_{prefix}_b.zip",
+        KEYFRAMES_DIR / f"Keyframes_{prefix}_c.zip",
+        KEYFRAMES_DIR / f"Keyframes_{prefix}_d.zip",
+        KEYFRAMES_DIR / f"Keyframes_{prefix}_e.zip",
+        Path("data") / f"Keyframes_{prefix}.zip",
+    ]
+    targets = [
+        f"keyframes/{video_id}/{frame_idx:03d}.jpg",
+        f"keyframes/{video_id}/{frame_idx:06d}.jpg",
+        f"keyframes/{video_id}/{frame_idx}.jpg",
+        f"{video_id}/{frame_idx:03d}.jpg",
+        f"{video_id}/{frame_idx:06d}.jpg",
+        f"{video_id}/{frame_idx}.jpg",
+    ]
+    for zp in zip_candidates:
+        if zp.exists():
+            try:
+                with zipfile.ZipFile(zp, "r") as z:
+                    names_set = set(z.namelist())
+                    for t in targets:
+                        if t in names_set:
+                            with z.open(t) as f:
+                                return Image.open(io.BytesIO(f.read())).convert("RGB")
+                        for fname in names_set:
+                            if fname.endswith(t):
+                                with z.open(fname) as f:
+                                    return Image.open(io.BytesIO(f.read())).convert("RGB")
+            except Exception:
+                pass
+
+    # 3. Cloud media fallback
+    if AIC_USE_CLOUD_MEDIA:
+        url = f"{HF_DATASET_URL}/keyframes/{video_id}/{frame_idx:03d}.jpg"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=5) as res:
+                return Image.open(io.BytesIO(res.read())).convert("RGB")
+        except Exception:
+            pass
+
+    return Image.new("RGB", (320, 240), color="gray")
+
+
+@app.post("/api/qa/answer")
+def qa_answer(req: QARequest):
+    """Answer Task 2 Q&A query using Gemini Cloud or Local Thinking VLM."""
+    from ..qa.vlm_engine import GroundedQAEngine
+
+    if not req.question.strip():
+        raise HTTPException(status_code=400, detail="Question is required")
+    if not req.video_id.strip():
+        raise HTTPException(status_code=400, detail="Video ID is required")
+
+    frame_ids = req.frame_ids or [1]
+    candidate_frames = []
+    for fid in frame_ids:
+        img = _resolve_keyframe_image(req.video_id, fid)
+        candidate_frames.append((fid, img))
+
+    try:
+        engine = GroundedQAEngine(
+            provider=req.provider,
+            api_key=req.api_key,
+        )
+        res = engine.answer_query(
+            question=req.question,
+            video_id=req.video_id,
+            candidate_frames=candidate_frames,
+        )
+        res_dict = {
+            "video_id": res.video_id,
+            "frame_id": res.frame_id,
+            "answer": res.answer,
+            "confidence": res.confidence,
+            "evidence": res.evidence,
+        }
+        return {
+            "ok": True,
+            "video_id": res.video_id,
+            "frame_id": res.frame_id,
+            "answer": res.answer,
+            "confidence": res.confidence,
+            "evidence": res.evidence,
+            "result": res_dict,
+            "thinking_process": res.thinking_process,
+            "provider": res.provider,
+            "latency_ms": res.latency_ms,
+            "is_grounded": res.is_grounded,
+            "submission_row": res.to_submission_row(),
+        }
+    except Exception as e:
+        logger.error("QA Answer failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # Static files + SPA fallback
 # ---------------------------------------------------------------------------
 

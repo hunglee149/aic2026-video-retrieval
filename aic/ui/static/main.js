@@ -58,10 +58,16 @@ function $(id) { return document.getElementById(id); }
 const submissionHelpers = window.AICSubmissionHelpers;
 
 function toast(msg, type = 'info') {
+  let container = $('toast-container');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'toast-container';
+    document.body.appendChild(container);
+  }
   const el = document.createElement('div');
   el.className = `toast toast-${type}`;
   el.textContent = msg;
-  $('toast-container').appendChild(el);
+  container.appendChild(el);
   requestAnimationFrame(() => el.classList.add('show'));
   setTimeout(() => {
     el.classList.remove('show');
@@ -480,93 +486,21 @@ function renderValidationReport() {
 // Status check
 // ---------------------------------------------------------------------------
 
-const COMPONENT_LABELS = {
-  translation: 'Dịch',
-  clip: 'CLIP',
-  siglip: 'SigLIP',
-  bm25: 'BM25',
-  keyframe_map: 'Keyframe',
-  dummy: 'Demo',
-};
-
-const COMPONENT_STATE_TEXT = {
-  idle: 'chưa nạp',
-  loading: 'đang nạp…',
-  ready: 'sẵn sàng',
-  error: 'lỗi',
-  disabled: 'tắt',
-};
-
-// Trạng thái nạp gần nhất, để doTranslate() biết có nên báo "đang nạp model" không.
-state.componentStates = state.componentStates || {};
-
-function renderComponentChips(components) {
-  const container = $('component-status');
-  if (!container) return;
-  container.innerHTML = '';
-  (components || []).forEach((c) => {
-    const chip = document.createElement('span');
-    chip.className = `component-chip state-${c.state}`;
-    chip.title = c.error ? `${c.detail} — ${c.error}` : c.detail;
-    const dot = document.createElement('span');
-    dot.className = 'chip-dot';
-    const label = document.createElement('span');
-    label.textContent = COMPONENT_LABELS[c.name] || c.name;
-    chip.append(dot, label);
-    if (c.state === 'error') {
-      // Lỗi dính lại cho tới khi reload — cho operator một đường thoát tại chỗ.
-      chip.title += '\nBấm để thử nạp lại';
-      chip.onclick = () => reloadComponent(c.name);
-    }
-    container.appendChild(chip);
-  });
-}
-
-async function reloadComponent(name) {
-  toast(`Đang nạp lại ${COMPONENT_LABELS[name] || name}…`, 'info');
-  try {
-    const res = await fetch(`/api/components/${encodeURIComponent(name)}/reload`, {
-      method: 'POST',
-    });
-    const data = await res.json();
-    const slot = data.component || {};
-    if (slot.state === 'ready') toast(`${COMPONENT_LABELS[name] || name} đã sẵn sàng`, 'success');
-    else toast(`${COMPONENT_LABELS[name] || name}: ${slot.error || 'vẫn lỗi'}`, 'error');
-  } catch {
-    toast('Lỗi kết nối', 'error');
-  }
-  checkStatus();
-}
-
 async function checkStatus() {
-  let anyLoading = false;
   try {
     const res = await fetch('/api/status');
     const data = await res.json();
     if (data.ok) {
       $('status-text').textContent = data.retriever;
-      const colour = data.loading ? 'var(--amber, #f59e0b)' : 'var(--green)';
-      $('status-dot').style.background = colour;
-      $('status-dot').style.boxShadow = `0 0 6px ${colour}`;
+      $('status-dot').style.background = 'var(--green)';
+      $('status-dot').style.boxShadow = '0 0 6px var(--green)';
       $('stat-keyframes').textContent = data.retriever === 'dummy' ? 'demo' : '—';
-      renderComponentChips(data.components);
-      state.componentStates = {};
-      (data.components || []).forEach((c) => { state.componentStates[c.name] = c.state; });
-      anyLoading = Boolean(data.loading);
     }
   } catch {
     $('status-text').textContent = 'Offline';
     $('status-dot').style.background = 'var(--red)';
     $('status-dot').style.boxShadow = '0 0 6px var(--red)';
   }
-  return anyLoading;
-}
-
-// Poll dày trong lúc còn thành phần đang nạp, thưa lại khi đã ổn định — để
-// operator thấy chip đổi màu theo thời gian thực mà không phải F5.
-async function scheduleStatusPolling() {
-  const anyLoading = await checkStatus();
-  setTimeout(scheduleStatusPolling, anyLoading ? 3000 : 30000);
 }
 
 // ---------------------------------------------------------------------------
@@ -635,11 +569,6 @@ function selectTask(task) {
 async function doTranslate() {
   const text_vi = $('query-input').value.trim();
   if (!text_vi) { toast('Nhập câu hỏi tiếng Việt trước', 'warning'); return; }
-  if (state.componentStates.translation !== 'ready') {
-    // Model dịch nạp riêng, không phải chờ CLIP/BM25 — nhưng lần đầu vẫn mất
-    // vài chục giây, nói ra để nút không có vẻ như bị treo.
-    toast('Đang nạp mô hình dịch (lần đầu ~30s)…', 'info');
-  }
   setLoading('btn-translate', true);
   try {
     const res = await fetch('/api/translate', {
@@ -1755,7 +1684,8 @@ document.addEventListener('DOMContentLoaded', () => {
   loadPrivateQueryCache();
   loadPrivateSelections();
   connectWs();
-  scheduleStatusPolling();
+  checkStatus();
+  setInterval(checkStatus, 30000);
   if (state.manifest.length) selectManifestQuery(state.manifest[0].query_id);
   else selectTask('kis');
   $('query-id-input').addEventListener('input', () => {
@@ -3240,4 +3170,93 @@ function renderManualSelections() {
     container.appendChild(card);
   });
 }
+// ---------------------------------------------------------------------------
+// AI Grounded VQA Integration (Task 2)
+// ---------------------------------------------------------------------------
 
+async function doAIVQA() {
+  const btn = $('btn-ai-qa');
+  const providerSelect = $('qa-provider-select');
+  const thoughtBox = $('qa-thinking-box');
+  const answerInput = $('answer-input');
+  const frameInput = $('frame-input');
+
+  const question = $('query-input')?.value?.trim() || $('translated-text')?.value?.trim() || '';
+  if (!question) {
+    toast('Vui lòng nhập câu hỏi để AI phân tích!', 'warning');
+    return;
+  }
+
+  const selectedIdx = state.selected;
+  const c = state.candidates && selectedIdx !== null ? state.candidates[selectedIdx] : null;
+  const videoId = c ? c.video_id : $('detail-video-id')?.textContent?.trim();
+  if (!videoId || videoId === '—') {
+    toast('Vui lòng chọn một video ứng viên trước!', 'warning');
+    return;
+  }
+
+  const frameIds = c?.representative_frames || [parseInt(frameInput?.value, 10) || 1];
+  const provider = providerSelect ? providerSelect.value : 'gemini';
+
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-ring" style="width:12px;height:12px;display:inline-block;vertical-align:middle;margin-right:4px;border-width:2px;"></span> Đang suy luận...';
+  }
+  if (thoughtBox) {
+    thoughtBox.style.display = 'block';
+    thoughtBox.innerHTML = '<span style="color:var(--text-muted);">🧠 Đang phân tích khung hình video và suy luận câu trả lời...</span>';
+  }
+
+  try {
+    const res = await fetch('/api/qa/answer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question: question,
+        video_id: videoId,
+        frame_ids: frameIds,
+        provider: provider
+      })
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Lỗi khi gọi AI VQA');
+    }
+
+    const data = await res.json();
+    
+    if (answerInput && data.answer) {
+      answerInput.value = data.answer;
+      answerInput.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    if (frameInput && data.frame_id) {
+      frameInput.value = data.frame_id;
+      state.selectedFrame = data.frame_id;
+      const curFrameLabel = $('video-current-frame');
+      if (curFrameLabel) curFrameLabel.textContent = data.frame_id;
+    }
+
+    if (thoughtBox) {
+      let html = `<strong>Đáp án:</strong> <span style="color:var(--green);">${data.answer}</span> (Độ tin cậy: ${(data.confidence * 100).toFixed(0)}%)<br/>`;
+      if (data.evidence) {
+        html += `<span style="color:var(--text-secondary);font-size:11px;">🔍 Bằng chứng: ${data.evidence}</span>`;
+      }
+      thoughtBox.innerHTML = html;
+    }
+
+    toast(`AI đã trả lời: "${data.answer}"`, 'success');
+  } catch (e) {
+    console.error('doAIVQA error:', e);
+    if (thoughtBox) {
+      thoughtBox.innerHTML = `<span style="color:var(--red);">⚠️ Lỗi: ${e.message}</span>`;
+    }
+    toast(`Lỗi AI VQA: ${e.message}`, 'error');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = '🤖 AI Trả lời';
+    }
+  }
+}
