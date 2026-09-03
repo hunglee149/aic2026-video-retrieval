@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - Ha/fix-ui-and-hf
+      - Ha/stabilize-system
+  workflow_dispatch:
 
 permissions:
   contents: read

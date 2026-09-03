@@ -65,7 +65,7 @@ RUN mkdir -p /app/local /app/data/input/input/index \
     && echo "fa7a55b3c7636aa896ea779b363ebd7b30ad9d103cbb20429a70e86a8e819140  /app/local/clip_faiss.index" | sha256sum -c - \
     && echo "5300a31f9c25123b834801f1389290f893bf85925bfadcfcacddd4ed68dc8acf  /app/local/clip_metadata.json" | sha256sum -c - \
     && if [ "$INCLUDE_BM25" = "1" ]; then \
-         echo "aa0b131efd2796e5415f4828012cb55b68aeb99ed7e843ac342fcd6a0b94c5ec  /app/data/input/input/index/text_search_index.pkl" | sha256sum -c -; \
+         echo "69e31f5b5ea99609d3a7543488649ba958d66a6aea6f7f9fc1da6b80b78474c0  /app/data/input/input/index/text_search_index.pkl" | sha256sum -c -; \
        fi
 
 # Run as non-root and prefetch model weights into this user's cache. The cache
