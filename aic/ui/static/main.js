@@ -57,6 +57,16 @@ const state = {
 function $(id) { return document.getElementById(id); }
 const submissionHelpers = window.AICSubmissionHelpers;
 
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function toast(msg, type = 'info') {
   const el = document.createElement('div');
   el.className = `toast toast-${type}`;
@@ -104,7 +114,7 @@ function currentVideoFrame() {
   const video = $('preview-vid');
   if (!video || video.style.display === 'none') return null;
   const fps = state.currentFps || 25;
-  return Math.round(video.currentTime * fps) + 1;
+  return Math.floor(video.currentTime * fps) + 1;
 }
 
 function updatePlaybackFrame() {
@@ -994,7 +1004,7 @@ function grabTrakeFrame(index, e) {
   let frameVal = 1;
   if (vid && vid.style.display !== 'none') {
     const fps = state.currentFps || 25;
-    frameVal = Math.round(vid.currentTime * fps) + 1;
+    frameVal = Math.floor(vid.currentTime * fps) + 1;
   } else if (state.selected !== null) {
     const c = state.candidates[state.selected];
     frameVal = submissionHelpers.candidateToSubmissionFrame(c);
@@ -1168,7 +1178,8 @@ function renderSelectionsList() {
       infoText = `${s.video_id} <span style="color:var(--text-muted)">f${s.frames[0]}</span>`;
     } else if (s.task === 'qa') {
       const truncateAns = s.answer.length > 15 ? s.answer.substring(0, 15) + '...' : s.answer;
-      infoText = `${s.video_id} <span style="color:var(--text-muted)">f${s.frames[0]}</span><br><span style="font-size:11px;color:var(--text-secondary)">"${truncateAns}"</span>`;
+      const safeAns = escapeHtml(truncateAns);
+      infoText = `${s.video_id} <span style="color:var(--text-muted)">f${s.frames[0]}</span><br><span style="font-size:11px;color:var(--text-secondary)">"${safeAns}"</span>`;
     } else if (s.task === 'trake') {
       infoText = `${s.video_id} <span style="color:var(--text-muted)">f[${s.frames.join(',')}]</span>`;
     }
@@ -1449,7 +1460,7 @@ function showExportReview(queryId) {
         <div style="flex:1">
           <div style="font-family:'JetBrains Mono',monospace; font-weight:600; color:var(--cyan); font-size:13px; margin-bottom:2px;">${s.video_id} <span style="font-size:11px; color:var(--text-muted)">f${s.frames[0]}</span></div>
           <div style="font-size:11px; font-weight:600; color:var(--text-muted); text-transform:uppercase; margin-bottom:2px;">Đáp án:</div>
-          <div style="font-size:13px; color:var(--text-primary); font-weight:500; background:rgba(255,255,255,0.03); border:1px solid var(--border); padding:6px 10px; border-radius:var(--radius-sm); white-space:pre-wrap;">${s.answer}</div>
+          <div style="font-size:13px; color:var(--text-primary); font-weight:500; background:rgba(255,255,255,0.03); border:1px solid var(--border); padding:6px 10px; border-radius:var(--radius-sm); white-space:pre-wrap;">${escapeHtml(s.answer)}</div>
         </div>
       </div>
     `).join('');
@@ -1959,8 +1970,24 @@ function connectWs() {
 
         isApplyingWsUpdate = true;
         try {
-          state.manifest = msg.manifest || [];
-          state.selections = msg.selections || [];
+          if (msg.manifest && msg.manifest.length > 0) {
+            state.manifest = msg.manifest;
+          } else if (!state.manifest || state.manifest.length === 0) {
+            state.manifest = [];
+          }
+
+          if (msg.selections) {
+            if (!state.selections || state.selections.length === 0) {
+              state.selections = msg.selections;
+            } else if (msg.selections.length > 0) {
+              const incomingQids = new Set(msg.selections.map(s => s.queryId || s.query_id).filter(Boolean));
+              const keptLocal = state.selections.filter(s => {
+                const qid = s.queryId || s.query_id;
+                return qid && !incomingQids.has(qid);
+              });
+              state.selections = [...keptLocal, ...msg.selections];
+            }
+          }
           
           const deserialized = {};
           if (msg.queryCache) {
@@ -2826,7 +2853,7 @@ function currentPrivateVideoFrame() {
   const video = $('private-preview-vid');
   if (!video || video.style.display === 'none') return null;
   const fps = state.privateCurrentFps || 25;
-  return Math.round(video.currentTime * fps) + 1;
+  return Math.floor(video.currentTime * fps) + 1;
 }
 
 function updatePrivatePlaybackFrame() {
@@ -3030,7 +3057,7 @@ function currentManualVideoFrame() {
   const video = $('manual-preview-vid');
   if (!video || video.style.display === 'none') return null;
   const fps = state.manualCurrentFps || 25;
-  return Math.round(video.currentTime * fps) + 1;
+  return Math.floor(video.currentTime * fps) + 1;
 }
 
 function updateManualPlaybackFrame() {

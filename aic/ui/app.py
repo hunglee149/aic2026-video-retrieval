@@ -373,6 +373,104 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+def validate_ws_update(data: Any) -> tuple[bool, str]:
+    """Kiểm tra cấu trúc dữ liệu gửi qua WebSocket."""
+    if not isinstance(data, dict):
+        return False, "Payload phải là dictionary/JSON object"
+    if data.get("type") != "update":
+        return False, f"Loại message không hợp lệ: {data.get('type')}"
+
+    if "manifest" in data:
+        if not isinstance(data["manifest"], list):
+            return False, "Trường 'manifest' phải là mảng/list"
+        for idx, item in enumerate(data["manifest"]):
+            if not isinstance(item, dict) or not item.get("query_id"):
+                return False, f"Phần tử manifest[{idx}] thiếu trường 'query_id'"
+
+    if "selections" in data:
+        if not isinstance(data["selections"], list):
+            return False, "Trường 'selections' phải là mảng/list"
+        for idx, item in enumerate(data["selections"]):
+            if not isinstance(item, dict):
+                return False, f"Phần tử selections[{idx}] phải là object"
+            if not item.get("video_id") or "frames" not in item:
+                return False, f"Phần tử selections[{idx}] thiếu 'video_id' hoặc 'frames'"
+            if not isinstance(item["frames"], list):
+                return False, f"Trường frames trong selections[{idx}] phải là mảng"
+
+    if "queryCache" in data and not isinstance(data["queryCache"], dict):
+        return False, "Trường 'queryCache' phải là dictionary/object"
+
+    return True, ""
+
+
+def merge_shared_state(
+    incoming_manifest: Optional[list],
+    incoming_selections: Optional[list],
+    incoming_query_cache: Optional[dict],
+) -> None:
+    """Hợp nhất dữ liệu mới, ngăn một người dùng ghi đè dữ liệu của người khác.
+
+    - Manifest: upsert theo query_id, giữ lại các query khác.
+    - Selections: hợp nhất theo queryId. Nếu incoming có selections cho query X,
+      chỉ cập nhật selections của query X; giữ nguyên selections của các query khác.
+    - Query Cache: dict.update theo từng queryId.
+    """
+    global shared_manifest, shared_selections, shared_query_cache
+
+    # 1. Merge manifest
+    if incoming_manifest is not None and isinstance(incoming_manifest, list):
+        if not shared_manifest:
+            shared_manifest = list(incoming_manifest)
+        elif incoming_manifest:
+            manifest_by_id = {
+                item["query_id"]: item
+                for item in shared_manifest
+                if isinstance(item, dict) and "query_id" in item
+            }
+            for item in incoming_manifest:
+                if isinstance(item, dict) and "query_id" in item:
+                    manifest_by_id[item["query_id"]] = item
+            shared_manifest = list(manifest_by_id.values())
+
+    # 2. Merge selections
+    if incoming_selections is not None and isinstance(incoming_selections, list):
+        if not shared_selections:
+            shared_selections = list(incoming_selections)
+        elif incoming_selections:
+            # Nhận biết các queryId được cập nhật trong payload này
+            updated_query_ids = {
+                s.get("queryId") or s.get("query_id")
+                for s in incoming_selections
+                if isinstance(s, dict) and (s.get("queryId") or s.get("query_id"))
+            }
+
+            if updated_query_ids:
+                # Giữ lại selections thuộc các query khác
+                kept_selections = [
+                    s for s in shared_selections
+                    if isinstance(s, dict) and (s.get("queryId") or s.get("query_id")) not in updated_query_ids
+                ]
+                shared_selections = kept_selections + list(incoming_selections)
+            else:
+                def _sel_key(s: dict) -> tuple:
+                    return (
+                        s.get("queryId") or s.get("query_id", ""),
+                        s.get("video_id", ""),
+                        tuple(s.get("frames", [])),
+                        s.get("answer", ""),
+                    )
+                seen_keys = {_sel_key(s) for s in shared_selections if isinstance(s, dict)}
+                for s in incoming_selections:
+                    if isinstance(s, dict) and _sel_key(s) not in seen_keys:
+                        shared_selections.append(s)
+                        seen_keys.add(_sel_key(s))
+
+    # 3. Merge query cache
+    if incoming_query_cache is not None and isinstance(incoming_query_cache, dict):
+        shared_query_cache.update(incoming_query_cache)
+
+
 @app.websocket("/api/ws")
 async def websocket_endpoint(websocket: WebSocket):
     global shared_manifest, shared_selections, shared_query_cache
@@ -387,18 +485,28 @@ async def websocket_endpoint(websocket: WebSocket):
         })
         while True:
             data = await websocket.receive_json()
-            if data.get("type") == "update":
-                shared_manifest = data.get("manifest", [])
-                shared_selections = data.get("selections", [])
-                shared_query_cache = data.get("queryCache", {})
-                save_shared_state()
-                # Broadcast to all other clients
-                await manager.broadcast({
-                    "type": "update",
-                    "manifest": shared_manifest,
-                    "selections": shared_selections,
-                    "queryCache": shared_query_cache
-                }, websocket)
+            is_valid, err_msg = validate_ws_update(data)
+            if not is_valid:
+                logger.warning("Bỏ qua payload WebSocket không hợp lệ: %s", err_msg)
+                try:
+                    await websocket.send_json({"type": "error", "detail": err_msg})
+                except Exception:
+                    pass
+                continue
+
+            merge_shared_state(
+                data.get("manifest"),
+                data.get("selections"),
+                data.get("queryCache"),
+            )
+            save_shared_state()
+            # Broadcast to all other clients
+            await manager.broadcast({
+                "type": "update",
+                "manifest": shared_manifest,
+                "selections": shared_selections,
+                "queryCache": shared_query_cache
+            }, websocket)
     except WebSocketDisconnect:
         manager.disconnect(websocket)
     except Exception as e:
@@ -1292,10 +1400,14 @@ def _get_video_fps_map() -> dict:
 
 @app.get("/api/video_info/{video_id}")
 def get_video_info(video_id: str):
-    """Lấy thông tin video (fps) từ video_metadata.json."""
+    """Lấy thông tin video (fps), ưu tiên FPS chính xác từ map-keyframes của BTC."""
+    fps_map = _get_video_fps_map()
+    if video_id in fps_map:
+        return {"fps": fps_map[video_id]}
+
     meta = load_video_metadata()
     video_info = meta.get(video_id)
-    if video_info:
+    if video_info and "fps" in video_info:
         return {"fps": video_info["fps"]}
     return {"fps": 25.0, "source": "fallback", "reliable": False}
 

@@ -86,3 +86,9 @@ def test_video_endpoints():
         res_video = client.get("/api/video/L21_V001", follow_redirects=False)
         assert res_video.status_code == 307
         assert "huggingface.co/datasets/manhha2502/fullhd" in res_video.headers["location"]
+
+        # Ưu tiên FPS chính xác từ map-keyframes
+        with patch("aic.ui.app._get_video_fps_map", return_value={"L21_V001": 29.97}):
+            res_fps = client.get("/api/video_info/L21_V001")
+            assert res_fps.status_code == 200
+            assert res_fps.json() == {"fps": 29.97}

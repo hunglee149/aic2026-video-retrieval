@@ -163,6 +163,44 @@ def build_ocr_documents(
     return documents, stats
 
 
+def compute_bm25_stats(tokenized: list[list[str]]) -> dict:
+    """Tính trước các thống kê BM25 (inverted, idf, avgdl, doc_lengths, N).
+
+    Việc lưu sẵn các trường này vào file pickle giúp TextRetriever nạp trực tiếp
+    vào bộ nhớ chỉ trong vài mili-giây, bỏ qua bước tính toán lại trên toàn bộ
+    hàng trăm nghìn documents, tiết kiệm đáng kể thời gian khởi động và đỉnh RAM.
+    """
+    import math
+    from collections import defaultdict
+
+    N = len(tokenized)
+    doc_lengths = [len(tokens) for tokens in tokenized]
+    total_length = sum(doc_lengths)
+    avgdl = total_length / N if N else 0.0
+
+    document_freq: Counter[str] = Counter()
+    for tokens in tokenized:
+        document_freq.update(set(tokens))
+
+    idf = {
+        term: math.log((N - freq + 0.5) / (freq + 0.5) + 1.0)
+        for term, freq in document_freq.items()
+    }
+
+    inverted: dict[str, list[tuple[int, int]]] = defaultdict(list)
+    for doc_idx, tokens in enumerate(tokenized):
+        for term, count in Counter(tokens).items():
+            inverted[term].append((doc_idx, count))
+
+    return {
+        "N": N,
+        "doc_lengths": doc_lengths,
+        "avgdl": avgdl,
+        "idf": idf,
+        "inverted": dict(inverted),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--index", required=True, type=Path,
@@ -175,6 +213,8 @@ def main() -> int:
                         default=DEFAULT_MIN_CONFIDENCE)
     parser.add_argument("--no-backup", action="store_true",
                         help="không tạo bản sao .bak khi ghi đè")
+    parser.add_argument("--no-precompute-bm25", action="store_true",
+                        help="không tính sẵn thống kê BM25 vào file index")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -246,9 +286,15 @@ def main() -> int:
     payload["documents"] = out_documents
     payload["tokenized"] = out_tokenized
     payload["keyframe_map"] = keyframe_map
-    # Thống kê BM25 precompute (nếu pickle cũ có) đã hết đúng vì corpus đổi.
-    for stale in ("inverted", "idf", "avgdl", "N", "doc_lengths"):
-        payload.pop(stale, None)
+
+    if not args.no_precompute_bm25:
+        logger.info("Tính sẵn thống kê BM25 (inverted, idf, avgdl, doc_lengths, N)...")
+        bm25_stats = compute_bm25_stats(out_tokenized)
+        payload.update(bm25_stats)
+        logger.info("  → Precomputed BM25: %d terms, avgdl=%.2f", len(bm25_stats["idf"]), bm25_stats["avgdl"])
+    else:
+        for stale in ("inverted", "idf", "avgdl", "N", "doc_lengths"):
+            payload.pop(stale, None)
 
     after = Counter(doc.get("type") for doc in out_documents)
     logger.info("Index mới: %d document: %s", len(out_documents), dict(after))

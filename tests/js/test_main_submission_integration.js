@@ -687,3 +687,37 @@ test('translating before the model is ready says so instead of hanging silently'
   assert.ok(toasts.some((text) => /Đang nạp mô hình dịch/.test(text)));
   assert.equal(document.getElementById('translated-text').value, 'a man cooking');
 });
+
+test('currentVideoFrame computes frame index with Math.floor to avoid premature frame jumping', () => {
+  const { context, document } = createMainHarness();
+  const video = document.getElementById('preview-vid');
+  video.style.display = 'block';
+  // At fps 25: frame 0 interval is [0.00, 0.04).
+  // At currentTime = 0.038s: 0.038 * 25 = 0.95.
+  // Math.floor(0.95) + 1 = 1 (actual frame 1).
+  // Math.round(0.95) + 1 would have erroneously produced 2.
+  video.currentTime = 0.038;
+  setState(context, 'currentFps', 25);
+  const frame = vm.runInContext('currentVideoFrame()', context);
+  assert.equal(frame, 1);
+});
+
+test('Q&A answer view escapes HTML tags to prevent XSS injection', () => {
+  const { context, document } = createMainHarness();
+  setState(context, 'task', 'qa');
+  setState(context, 'manifest', [{ query_id: 'qa1', task: 'qa' }]);
+  setState(context, 'currentQueryId', 'qa1');
+  setState(context, 'selections', [
+    { queryId: 'qa1', video_id: 'L01_V001', frames: [100], answer: '<script>alert(1)</script>', task: 'qa' }
+  ]);
+  vm.runInContext('renderSelectionsList()', context);
+  const container = document.getElementById('selections-list');
+  assert.ok(!container.innerHTML.includes('<script>'));
+  assert.ok(container.innerHTML.includes('&lt;script&gt;'));
+
+  vm.runInContext('showExportReview("qa1")', context);
+  const reviewBody = document.getElementById('review-content-body');
+  assert.ok(!reviewBody.innerHTML.includes('<script>alert(1)</script>'));
+  assert.ok(reviewBody.innerHTML.includes('&lt;script&gt;alert(1)&lt;/script&gt;'));
+});
+
