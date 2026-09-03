@@ -242,13 +242,59 @@ def main() -> int:
     out_documents = [doc for doc, _ in final]
     out_tokenized = [tokens for _, tokens in final]
 
+    from array import array
+    import math
+    from aic.retrieval.text_retriever import remove_accents
+
+    logger.info("Tính toán precomputed BM25 statistics (N, avgdl, doc_lengths, idf, inverted)...")
+    N = len(out_documents)
+    doc_lengths = array('I', [len(tokens) for tokens in out_tokenized])
+    total_length = sum(doc_lengths)
+    avgdl = total_length / N if N else 0.0
+
+    document_freq: Counter[str] = Counter()
+    for tokens in out_tokenized:
+        document_freq.update(set(tokens))
+
+    idf = {
+        term: math.log((N - freq + 0.5) / (freq + 0.5) + 1.0)
+        for term, freq in document_freq.items()
+    }
+
+    raw_inverted: dict[str, list[tuple[int, int]]] = {}
+    for doc_idx, tokens in enumerate(out_tokenized):
+        for term, count in Counter(tokens).items():
+            if term not in raw_inverted:
+                raw_inverted[term] = []
+            raw_inverted[term].append((doc_idx, count))
+
+    # Convert to compact binary arrays (array('I'), array('H'))
+    inverted_arrays = {}
+    accent_map = {}
+    for term, postings in raw_inverted.items():
+        doc_ids = array('I', [p[0] for p in postings])
+        counts = array('H', [min(p[1], 65535) for p in postings])
+        inverted_arrays[term] = (doc_ids, counts)
+        
+        folded = remove_accents(term)
+        if folded != term:
+            if folded not in accent_map:
+                accent_map[folded] = []
+            accent_map[folded].append(term)
+
+    accent_index = {folded: sorted(terms)[:8] for folded, terms in accent_map.items()}
+
     payload = dict(data)
     payload["documents"] = out_documents
-    payload["tokenized"] = out_tokenized
+    payload["tokenized"] = []  # Không cần lưu tokenized nữa khi đã có inverted index
     payload["keyframe_map"] = keyframe_map
-    # Thống kê BM25 precompute (nếu pickle cũ có) đã hết đúng vì corpus đổi.
-    for stale in ("inverted", "idf", "avgdl", "N", "doc_lengths"):
-        payload.pop(stale, None)
+    payload["N"] = N
+    payload["avgdl"] = avgdl
+    payload["doc_lengths"] = doc_lengths
+    payload["idf"] = idf
+    payload["inverted"] = inverted_arrays
+    payload["inverted_arrays"] = inverted_arrays
+    payload["accent_index"] = accent_index
 
     after = Counter(doc.get("type") for doc in out_documents)
     logger.info("Index mới: %d document: %s", len(out_documents), dict(after))

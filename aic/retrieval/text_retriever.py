@@ -165,17 +165,27 @@ class TextRetriever:
         with self.index_path.open("rb") as handle:
             data = pickle.load(handle)
 
-        for key in ("documents", "tokenized"):
-            if key not in data:
-                raise ValueError(f"Text index thiếu khoá '{key}': {self.index_path}")
+        if "documents" not in data:
+            raise ValueError(f"Text index thiếu khoá 'documents': {self.index_path}")
 
         all_documents = data["documents"]
-        all_tokenized = data["tokenized"]
-        if len(all_documents) != len(all_tokenized):
-            raise ValueError(
-                f"documents ({len(all_documents)}) != tokenized "
-                f"({len(all_tokenized)}) trong {self.index_path}"
-            )
+        all_tokenized = data.get("tokenized")
+
+        # Kiểm tra xem index đã có sẵn precomputed stats (inverted, idf, avgdl, N) chưa
+        has_precomputed = (
+            ("inverted" in data or "inverted_arrays" in data)
+            and "idf" in data
+            and "avgdl" in data
+        )
+
+        if not has_precomputed:
+            if all_tokenized is None:
+                raise ValueError(f"Text index thiếu khoá 'tokenized': {self.index_path}")
+            if len(all_documents) != len(all_tokenized):
+                raise ValueError(
+                    f"documents ({len(all_documents)}) != tokenized "
+                    f"({len(all_tokenized)}) trong {self.index_path}"
+                )
 
         self.keyframe_map: dict[str, list[dict]] = data.get("keyframe_map", {})
         self.available_types = sorted(
@@ -185,21 +195,29 @@ class TextRetriever:
         selected = self._resolve_modalities(modalities or doc_types)
         self.modalities = selected
         if selected is None:
-            self.documents = list(all_documents)
-            self.tokenized = list(all_tokenized)
+            self.documents = all_documents
+            self.tokenized = all_tokenized or []
         else:
             self.documents = []
             self.tokenized = []
-            for doc, tokens in zip(all_documents, all_tokenized):
-                if doc.get("type") in selected:
-                    self.documents.append(doc)
-                    self.tokenized.append(tokens)
+            if all_tokenized and len(all_tokenized) == len(all_documents):
+                for doc, tokens in zip(all_documents, all_tokenized):
+                    if doc.get("type") in selected:
+                        self.documents.append(doc)
+                        self.tokenized.append(tokens)
+            else:
+                for doc in all_documents:
+                    if doc.get("type") in selected:
+                        self.documents.append(doc)
 
         logger.info("  → %d text documents loaded", len(self.documents))
 
         self._prepare_keyframe_lookup()
         self._load_or_build_bm25(data, used_subset=selected is not None)
-        self._build_accent_index()
+        if "accent_index" in data and not (selected is not None):
+            self._accent_index = data["accent_index"]
+        else:
+            self._build_accent_index()
 
     # ------------------------------------------------------------------
     # Khởi tạo
@@ -238,17 +256,30 @@ class TextRetriever:
         """Dùng thống kê precompute nếu có và còn hợp lệ, không thì build."""
         precomputed = (
             not used_subset
-            and all(key in data for key in ("inverted", "idf", "avgdl"))
+            and (("inverted" in data or "inverted_arrays" in data) and "idf" in data and "avgdl" in data)
         )
         if precomputed:
             logger.info("  → dùng inverted index/IDF có sẵn trong pickle")
-            self.inverted = data["inverted"]
+            self.inverted = data.get("inverted_arrays") or data["inverted"]
             self.idf = data["idf"]
             self.avgdl = float(data["avgdl"])
-            self.doc_lengths = data.get(
-                "doc_lengths", [len(t) for t in self.tokenized]
-            )
             self.N = int(data.get("N", len(self.documents)))
+            if "doc_lengths" in data and len(data["doc_lengths"]) == self.N:
+                self.doc_lengths = data["doc_lengths"]
+            elif self.tokenized:
+                self.doc_lengths = [len(t) for t in self.tokenized]
+            else:
+                # Tính doc_lengths từ inverted index nếu thiếu
+                doc_lengths = [0] * self.N
+                for postings in self.inverted.values():
+                    if isinstance(postings, tuple) and len(postings) == 2:
+                        doc_ids, counts = postings
+                        for doc_idx, count in zip(doc_ids, counts):
+                            doc_lengths[doc_idx] += count
+                    else:
+                        for doc_idx, count in postings:
+                            doc_lengths[doc_idx] += count
+                self.doc_lengths = doc_lengths
             return
         self._build_bm25()
 
@@ -332,11 +363,18 @@ class TextRetriever:
             idf = self.idf.get(term, 0.0)
             if idf <= 0.0:
                 continue
-            for doc_idx, count in postings:
-                doc_len = self.doc_lengths[doc_idx]
-                # Mẫu số dùng độ dài document thật, không phải hằng số.
-                denominator = count + k1 * (1 - b + b * doc_len / avgdl)
-                scores[doc_idx] += idf * (count * (k1 + 1)) / denominator
+            if isinstance(postings, tuple) and len(postings) == 2:
+                doc_ids, counts = postings
+                for doc_idx, count in zip(doc_ids, counts):
+                    doc_len = self.doc_lengths[doc_idx]
+                    denominator = count + k1 * (1 - b + b * doc_len / avgdl)
+                    scores[doc_idx] += idf * (count * (k1 + 1)) / denominator
+            else:
+                for doc_idx, count in postings:
+                    doc_len = self.doc_lengths[doc_idx]
+                    # Mẫu số dùng độ dài document thật, không phải hằng số.
+                    denominator = count + k1 * (1 - b + b * doc_len / avgdl)
+                    scores[doc_idx] += idf * (count * (k1 + 1)) / denominator
         return scores
 
     def _document_frame(self, doc: dict) -> int | None:
