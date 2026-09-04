@@ -363,9 +363,9 @@ class ConnectionManager:
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
 
-    async def broadcast(self, message: dict, sender: WebSocket):
-        for connection in self.active_connections:
-            if connection != sender:
+    async def broadcast(self, message: dict, sender: Optional[WebSocket] = None):
+        for connection in list(self.active_connections):
+            if sender is None or connection != sender:
                 try:
                     await connection.send_json(message)
                 except Exception:
@@ -378,8 +378,11 @@ def validate_ws_update(data: Any) -> tuple[bool, str]:
     if not isinstance(data, dict):
         return False, "Payload phải là dictionary/JSON object"
     msg_type = data.get("type")
-    if msg_type not in ("update", "delete_query"):
+    if msg_type not in ("update", "delete_query", "clear_all"):
         return False, f"Loại message không hợp lệ: {msg_type}"
+
+    if msg_type == "clear_all":
+        return True, ""
 
     if msg_type == "delete_query":
         query_id = data.get("query_id")
@@ -409,6 +412,17 @@ def validate_ws_update(data: Any) -> tuple[bool, str]:
         return False, "Trường 'queryCache' phải là dictionary/object"
 
     return True, ""
+
+
+def clear_shared_state() -> None:
+    """Xóa sạch toàn bộ shared_manifest, shared_selections và shared_query_cache."""
+    global shared_manifest, shared_selections, shared_query_cache
+    if shared_manifest is not None:
+        shared_manifest.clear()
+    if shared_selections is not None:
+        shared_selections.clear()
+    if isinstance(shared_query_cache, dict):
+        shared_query_cache.clear()
 
 
 def delete_shared_query(query_id: str) -> None:
@@ -518,6 +532,17 @@ async def websocket_endpoint(websocket: WebSocket):
                     pass
                 continue
 
+            if data.get("type") == "clear_all":
+                clear_shared_state()
+                save_shared_state()
+                await manager.broadcast({
+                    "type": "clear_all",
+                    "manifest": shared_manifest,
+                    "selections": shared_selections,
+                    "queryCache": shared_query_cache,
+                })
+                continue
+
             if data.get("type") == "delete_query":
                 query_id = data.get("query_id")
                 delete_shared_query(query_id)
@@ -549,6 +574,20 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         logger.warning("WebSocket handler error: %s", e)
         manager.disconnect(websocket)
+
+
+@app.post("/api/clear_state")
+async def api_clear_state():
+    """Xóa sạch toàn bộ shared_manifest, shared_selections và shared_query_cache trên server và đồng bộ tất cả clients."""
+    clear_shared_state()
+    save_shared_state()
+    await manager.broadcast({
+        "type": "clear_all",
+        "manifest": shared_manifest,
+        "selections": shared_selections,
+        "queryCache": shared_query_cache,
+    })
+    return {"ok": True, "message": "Toàn bộ shared state đã được xóa sạch."}
 
 _SUBMISSION_REPORT_PATHS = {"/api/export", "/api/query-pack/texts"}
 

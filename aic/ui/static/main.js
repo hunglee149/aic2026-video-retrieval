@@ -372,32 +372,28 @@ function deleteCurrentPrivateQuery() {
   deleteQuery(qid);
 }
 
-function clearAllCache() {
-  if (!confirm('Bạn có chắc chắn muốn xóa toàn bộ cache? Tất cả câu hỏi đã tải lên, các câu trả lời đã lưu, và lịch sử tìm kiếm sẽ bị xóa sạch.')) {
-    return;
-  }
+function resetClientStateAndUI(isFromRemote = false) {
   localStorage.removeItem('aic_selections');
   localStorage.removeItem('aic_manifest');
   localStorage.removeItem('aic_query_cache');
   localStorage.removeItem('aic_private_selections');
   localStorage.removeItem('aic_private_query_cache');
 
-  // Clear state
+  // Clear in-memory state
   state.manifest = [];
   state.selections = [];
   state.queryCache = {};
   state.currentQueryId = null;
   state.selected = null;
   state.candidates = [];
+  state.candidateDraftFrames = {};
   
   state.privateSelections = [];
   state.privateQueryCache = {};
   state.currentPrivateQueryId = null;
   state.privateSelected = null;
   state.privateCandidates = [];
-
-  // Update server and sync
-  sendWsUpdate();
+  state.privateCandidateDraftFrames = {};
 
   // Re-render UI views
   renderManifestList();
@@ -417,6 +413,33 @@ function clearAllCache() {
   const pqi = $('private-query-input'); if (pqi) pqi.value = '';
   const ptt = $('private-translated-text'); if (ptt) ptt.value = '';
   const pqii = $('private-query-id-input'); if (pqii) pqii.value = '';
+
+  if (isFromRemote) {
+    toast('Đã đồng bộ xóa toàn bộ cache từ người dùng khác', 'info');
+  }
+}
+
+async function clearAllCache() {
+  if (typeof confirm === 'function' && !confirm('Bạn có chắc chắn muốn xóa toàn bộ cache? Tất cả câu hỏi đã tải lên, các câu trả lời đã lưu, và lịch sử tìm kiếm sẽ bị xóa sạch.')) {
+    return;
+  }
+
+  // 1. Reset client state immediately
+  resetClientStateAndUI(false);
+
+  // 2. Broadcast clear_all via WebSocket
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'clear_all' }));
+  }
+
+  // 3. Guarantee disk and server memory cleared via REST API
+  if (typeof fetch === 'function') {
+    try {
+      await fetch('/api/clear_state', { method: 'POST' });
+    } catch (err) {
+      console.warn('POST /api/clear_state error:', err);
+    }
+  }
 
   toast('Đã xóa sạch cache hệ thống và đồng bộ!', 'success');
 }
@@ -2080,30 +2103,32 @@ function connectWs() {
   ws.onmessage = (event) => {
     try {
       const msg = JSON.parse(event.data);
-      if (msg.type === 'init' || msg.type === 'update') {
-        if (msg.type === 'init' && (!msg.manifest || msg.manifest.length === 0) && state.manifest && state.manifest.length > 0) {
-          sendWsUpdate();
-          return;
-        }
-
+      if (msg.type === 'clear_all') {
+        resetClientStateAndUI(true);
+      } else if (msg.type === 'init' || msg.type === 'update') {
         isApplyingWsUpdate = true;
         try {
-          if (msg.manifest && msg.manifest.length > 0) {
-            state.manifest = msg.manifest;
-          } else if (!state.manifest || state.manifest.length === 0) {
-            state.manifest = [];
-          }
+          if (msg.type === 'init') {
+            state.manifest = msg.manifest || [];
+            state.selections = msg.selections || [];
+          } else {
+            if (msg.manifest && msg.manifest.length > 0) {
+              state.manifest = msg.manifest;
+            } else if (!state.manifest || state.manifest.length === 0) {
+              state.manifest = [];
+            }
 
-          if (msg.selections) {
-            if (!state.selections || state.selections.length === 0) {
-              state.selections = msg.selections;
-            } else if (msg.selections.length > 0) {
-              const incomingQids = new Set(msg.selections.map(s => s.queryId || s.query_id).filter(Boolean));
-              const keptLocal = state.selections.filter(s => {
-                const qid = s.queryId || s.query_id;
-                return qid && !incomingQids.has(qid);
-              });
-              state.selections = [...keptLocal, ...msg.selections];
+            if (msg.selections) {
+              if (!state.selections || state.selections.length === 0) {
+                state.selections = msg.selections;
+              } else if (msg.selections.length > 0) {
+                const incomingQids = new Set(msg.selections.map(s => s.queryId || s.query_id).filter(Boolean));
+                const keptLocal = state.selections.filter(s => {
+                  const qid = s.queryId || s.query_id;
+                  return qid && !incomingQids.has(qid);
+                });
+                state.selections = [...keptLocal, ...msg.selections];
+              }
             }
           }
           
@@ -2126,11 +2151,13 @@ function connectWs() {
           renderSelectionsList();
           renderExportTable();
 
-          if (state.currentQueryId) {
+          if (state.currentQueryId && currentManifestItem()) {
             const item = currentManifestItem();
             const form = item ? submissionHelpers.manifestQueryFormState(item) : null;
             loadQueryFromCache(state.currentQueryId, form);
           } else {
+            state.currentQueryId = null;
+            clearQueryWorkspace();
             renderCandidates();
           }
         } finally {

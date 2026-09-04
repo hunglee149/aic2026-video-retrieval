@@ -235,6 +235,8 @@ function createMainHarness() {
     localStorage: {
       getItem(key) { return storage.has(key) ? storage.get(key) : null; },
       setItem(key, value) { storage.set(key, String(value)); },
+      removeItem(key) { storage.delete(key); },
+      clear() { storage.clear(); },
     },
     requestAnimationFrame(callback) { callback(); },
     setInterval() { return 1; },
@@ -262,6 +264,11 @@ function createMainHarness() {
       pathname: '/',
     },
     WebSocket: class FakeWebSocket {
+      static get CONNECTING() { return 0; }
+      static get OPEN() { return 1; }
+      static get CLOSING() { return 2; }
+      static get CLOSED() { return 3; }
+
       constructor(url) {
         this.url = url;
         this.sent = [];
@@ -754,6 +761,61 @@ test('deleteQuery removes query from manifest, selections, and cache', () => {
   assert.ok(queryCache.q2 !== undefined);
 
   assert.equal(vm.runInContext('state.currentQueryId', context), 'q2');
+});
+
+test('clearAllCache wipes state, selections, cache, and calls reset', async () => {
+  const { context, document } = createMainHarness();
+  setState(context, 'manifest', [
+    { query_id: 'q1', task: 'kis', text: 'query 1' }
+  ]);
+  setState(context, 'currentQueryId', 'q1');
+  setState(context, 'selections', [
+    { queryId: 'q1', video_id: 'V1', frames: [1] }
+  ]);
+  setState(context, 'queryCache', {
+    q1: { candidates: [] }
+  });
+
+  context.confirm = () => true;
+  vm.runInContext('connectWs()', context);
+  context.fetch = async () => ({ ok: true });
+
+  await vm.runInContext('clearAllCache()', context);
+
+  const manifest = stateJson(context, 'state.manifest');
+  assert.equal(manifest.length, 0);
+
+  const selections = stateJson(context, 'state.selections');
+  assert.equal(selections.length, 0);
+
+  const queryCache = stateJson(context, 'state.queryCache');
+  assert.deepEqual(queryCache, {});
+
+  assert.equal(vm.runInContext('state.currentQueryId', context), null);
+  const sent = vm.runInContext('ws.sent', context);
+  assert.ok(sent.length > 0);
+  const parsed = JSON.parse(sent[sent.length - 1]);
+  assert.equal(parsed.type, 'clear_all');
+});
+
+test('resetClientStateAndUI wipes all state when triggered by remote clear_all', () => {
+  const { context, document } = createMainHarness();
+  setState(context, 'manifest', [
+    { query_id: 'q1', task: 'kis', text: 'query 1' }
+  ]);
+  setState(context, 'currentQueryId', 'q1');
+  setState(context, 'selections', [
+    { queryId: 'q1', video_id: 'V1', frames: [1] }
+  ]);
+
+  vm.runInContext('resetClientStateAndUI(true)', context);
+
+  const manifest = stateJson(context, 'state.manifest');
+  assert.equal(manifest.length, 0);
+
+  const selections = stateJson(context, 'state.selections');
+  assert.equal(selections.length, 0);
+  assert.equal(vm.runInContext('state.currentQueryId', context), null);
 });
 
 

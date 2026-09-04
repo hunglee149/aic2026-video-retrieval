@@ -118,3 +118,21 @@ def test_delete_shared_query():
     assert "q1" not in app_module.shared_query_cache
     assert "q2" in app_module.shared_query_cache
 
+
+def test_validate_ws_clear_all():
+    is_valid, msg = validate_ws_update({"type": "clear_all"})
+    assert is_valid is True
+    assert msg == ""
+
+
+def test_clear_shared_state():
+    app_module.shared_manifest = [{"query_id": "q1", "task": "kis"}]
+    app_module.shared_selections = [{"queryId": "q1", "video_id": "V1", "frames": [1]}]
+    app_module.shared_query_cache = {"q1": {"candidates": ["c1"]}}
+
+    app_module.clear_shared_state()
+
+    assert app_module.shared_manifest == []
+    assert app_module.shared_selections == []
+    assert app_module.shared_query_cache == {}
+
