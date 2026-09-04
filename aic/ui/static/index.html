@@ -680,7 +680,41 @@
 <!-- Toast container -->
 <div id="toast-container"></div>
 
+<!-- Clear Cache Voting & Confirmation Modals -->
+<div id="clear-cache-overlay" class="modal-overlay" style="display:none">
+  <!-- 1. Waiting for approval modal -->
+  <div id="modal-clear-waiting" class="modal-box" style="display:none">
+    <div class="modal-header">
+      <div class="spinner-ring" style="width:24px;height:24px;border-width:3px;border-color:var(--purple);border-top-color:transparent"></div>
+      <h3>Đang chờ xác nhận từ máy khác</h3>
+    </div>
+    <div class="modal-body">
+      <p id="modal-waiting-msg">Hệ thống đang có máy khác đang hoạt động. Cần ít nhất 1 thành viên chấp thuận để thực hiện xóa cache hệ thống...</p>
+      <div class="modal-status-badge">⏳ Đang chờ phản hồi</div>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-secondary" onclick="cancelClearCacheRequest()">Hủy yêu cầu</button>
+    </div>
+  </div>
+
+  <!-- 2. Approval prompt modal (for other clients) -->
+  <div id="modal-clear-prompt" class="modal-box" style="display:none">
+    <div class="modal-header">
+      <span style="font-size:22px">⚠️</span>
+      <h3>Yêu cầu xóa toàn bộ cache</h3>
+    </div>
+    <div class="modal-body">
+      <p>Một thành viên trong nhóm đang yêu cầu <strong>xóa toàn bộ cache</strong> của hệ thống (bao gồm danh sách câu hỏi, câu trả lời đã lưu và lịch sử tìm kiếm).</p>
+      <p style="color:var(--text-secondary);font-size:12px;margin-top:8px">Hành động này sẽ làm trống dữ liệu trên tất cả các máy. Bạn có đồng ý xóa không?</p>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-red" onclick="respondClearCache(true)">✓ Đồng ý xóa</button>
+      <button type="button" class="btn btn-secondary" onclick="respondClearCache(false)">✕ Từ chối</button>
+    </div>
+  </div>
+</div>
+
 <script src="/static/submission_helpers.js?v=3"></script>
-<script src="/static/main.js?v=12"></script>
+<script src="/static/main.js?v=13"></script>
 </body>
 </html>

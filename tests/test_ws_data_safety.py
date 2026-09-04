@@ -136,3 +136,23 @@ def test_clear_shared_state():
     assert app_module.shared_selections == []
     assert app_module.shared_query_cache == {}
 
+
+def test_validate_ws_clear_cache_approval():
+    # request_clear_cache is valid
+    is_valid, msg = validate_ws_update({"type": "request_clear_cache"})
+    assert is_valid is True
+    assert msg == ""
+
+    # clear_cache_response with request_id is valid
+    is_valid, msg = validate_ws_update({"type": "clear_cache_response", "request_id": "r1", "approve": True})
+    assert is_valid is True
+
+    # clear_cache_response without request_id is invalid
+    is_valid, msg = validate_ws_update({"type": "clear_cache_response"})
+    assert is_valid is False
+    assert "request_id" in msg
+
+    # clear_cache_cancel is valid
+    is_valid, msg = validate_ws_update({"type": "clear_cache_cancel", "request_id": "r1"})
+    assert is_valid is True
+

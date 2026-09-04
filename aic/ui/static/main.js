@@ -419,20 +419,85 @@ function resetClientStateAndUI(isFromRemote = false) {
   }
 }
 
+let currentClearRequestId = null;
+
+function showClearCacheWaiting(count) {
+  const overlay = $('clear-cache-overlay');
+  const waiting = $('modal-clear-waiting');
+  const prompt = $('modal-clear-prompt');
+  if (overlay && waiting) {
+    if (prompt) prompt.style.display = 'none';
+    const msg = $('modal-waiting-msg');
+    if (msg) {
+      msg.textContent = `Hệ thống đang có ${count} máy khác đang hoạt động. Cần ít nhất 1 thành viên chấp thuận để thực hiện xóa cache hệ thống...`;
+    }
+    waiting.style.display = 'block';
+    overlay.style.display = 'flex';
+  }
+}
+
+function showClearCachePrompt(requestId) {
+  currentClearRequestId = requestId;
+  const overlay = $('clear-cache-overlay');
+  const waiting = $('modal-clear-waiting');
+  const prompt = $('modal-clear-prompt');
+  if (overlay && prompt) {
+    if (waiting) waiting.style.display = 'none';
+    prompt.style.display = 'block';
+    overlay.style.display = 'flex';
+  }
+}
+
+function hideClearCacheModals() {
+  const overlay = $('clear-cache-overlay');
+  const waiting = $('modal-clear-waiting');
+  const prompt = $('modal-clear-prompt');
+  if (overlay) overlay.style.display = 'none';
+  if (waiting) waiting.style.display = 'none';
+  if (prompt) prompt.style.display = 'none';
+}
+
+function cancelClearCacheRequest() {
+  hideClearCacheModals();
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      type: 'clear_cache_cancel',
+      request_id: currentClearRequestId,
+    }));
+  }
+  toast('Đã hủy yêu cầu xóa cache', 'info');
+}
+
+function respondClearCache(approve) {
+  hideClearCacheModals();
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      type: 'clear_cache_response',
+      request_id: currentClearRequestId,
+      approve: Boolean(approve),
+    }));
+  }
+  if (approve) {
+    toast('Bạn đã đồng ý xóa cache', 'info');
+  } else {
+    toast('Bạn đã từ chối yêu cầu xóa cache', 'info');
+  }
+}
+
 async function clearAllCache() {
   if (typeof confirm === 'function' && !confirm('Bạn có chắc chắn muốn xóa toàn bộ cache? Tất cả câu hỏi đã tải lên, các câu trả lời đã lưu, và lịch sử tìm kiếm sẽ bị xóa sạch.')) {
     return;
   }
 
-  // 1. Reset client state immediately
-  resetClientStateAndUI(false);
-
-  // 2. Broadcast clear_all via WebSocket
+  // Nếu kết nối WebSocket đang mở, gửi request_clear_cache:
+  // Server tự kiểm tra: nếu 1 máy -> xóa ngay; nếu >1 máy -> hỏi các máy còn lại
   if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'clear_all' }));
+    ws.send(JSON.stringify({ type: 'request_clear_cache' }));
+    return;
   }
 
-  // 3. Guarantee disk and server memory cleared via REST API
+  // Fallback ngoại tuyến / kiểm thử đơn lập không WebSocket
+  resetClientStateAndUI(false);
   if (typeof fetch === 'function') {
     try {
       await fetch('/api/clear_state', { method: 'POST' });
@@ -440,8 +505,7 @@ async function clearAllCache() {
       console.warn('POST /api/clear_state error:', err);
     }
   }
-
-  toast('Đã xóa sạch cache hệ thống và đồng bộ!', 'success');
+  toast('Đã xóa sạch cache hệ thống!', 'success');
 }
 
 function saveQueryCache() {
@@ -487,6 +551,7 @@ function saveCurrentQueryToCache() {
   if (!queryId) return;
 
   state.queryCache[queryId] = {
+    text_vi: $('query-input')?.value || '',
     translatedText: $('translated-text')?.value || '',
     candidates: state.candidates || [],
     selected: state.selected,
@@ -508,10 +573,13 @@ function saveCurrentQueryToCache() {
 function loadQueryFromCache(queryId, form) {
   const cached = state.queryCache[queryId];
   if (cached) {
+    if (cached.text_vi && $('query-input')) {
+      $('query-input').value = cached.text_vi;
+    }
     $('translated-text').value = cached.translatedText || '';
     
     state.candidates = cached.candidates || [];
-    state.selected = cached.selected;
+    state.selected = (cached.selected !== undefined && cached.selected !== null) ? cached.selected : null;
     state.candidateDraftFrames = Object.assign({}, cached.candidateDraftFrames);
     state.currentFps = cached.currentFps;
     state.currentPlaybackFrame = cached.currentPlaybackFrame;
@@ -525,17 +593,17 @@ function loadQueryFromCache(queryId, form) {
     state.iterUnsureList = cached.iterUnsureList || [];
     state.iterExcluded = new Set(cached.iterExcluded || []);
 
-    if (state.candidates.length) {
+    if (state.candidates && state.candidates.length) {
       renderCandidates();
       $('results-count').textContent = `${state.candidates.length} candidates`;
-      if (state.selected !== null) {
+      if (state.selected !== null && state.selected >= 0 && state.selected < state.candidates.length) {
         selectCandidate(state.selected);
       }
     } else {
       clearQueryWorkspace();
     }
   } else {
-    $('translated-text').value = form.translatedText || '';
+    $('translated-text').value = (form && form.translatedText) || '';
     clearQueryWorkspace();
   }
 }
@@ -792,6 +860,7 @@ async function doTranslate() {
     });
     const data = await res.json();
     $('translated-text').value = data.text_en || '';
+    saveCurrentQueryToCache();
     if (!data.ok) toast(`Dịch thất bại: ${data.error || ''}`, 'warning');
     else toast('Đã dịch thành công', 'success');
   } catch (e) {
@@ -815,8 +884,6 @@ async function doSearch() {
 
   const isManual = !state.manifest.some((item) => item.query_id === query_id);
   if (isManual) {
-    state.queryCache = {};
-    state.selections = [];
     state.manifest = [{
       query_id: query_id,
       task: state.task,
@@ -825,8 +892,6 @@ async function doSearch() {
       n_events: n_events,
       events_confirmed: true
     }];
-    saveQueryCache();
-    saveSelections();
     saveManifest();
     renderManifestList();
     renderSelectionsList();
@@ -850,6 +915,7 @@ async function doSearch() {
     state.selected = null;
     renderCandidates();
     $('results-count').textContent = `${data.total} candidates`;
+    saveCurrentQueryToCache();
     toast(`Tìm được ${data.total} kết quả`, 'success');
   } catch (e) {
     $('candidates-grid').innerHTML = `<div class="empty-state"><p style="color:var(--red)">❌ ${e.message}</p></div>`;
@@ -2104,7 +2170,18 @@ function connectWs() {
     try {
       const msg = JSON.parse(event.data);
       if (msg.type === 'clear_all') {
+        hideClearCacheModals();
         resetClientStateAndUI(true);
+      } else if (msg.type === 'clear_cache_waiting') {
+        currentClearRequestId = msg.request_id;
+        showClearCacheWaiting(msg.count || 1);
+      } else if (msg.type === 'clear_cache_prompt') {
+        showClearCachePrompt(msg.request_id);
+      } else if (msg.type === 'clear_cache_rejected') {
+        hideClearCacheModals();
+        toast(msg.reason || 'Yêu cầu xóa cache bị từ chối do không có sự đồng ý của thành viên nào.', 'warning');
+      } else if (msg.type === 'clear_cache_dismiss') {
+        hideClearCacheModals();
       } else if (msg.type === 'init' || msg.type === 'update') {
         isApplyingWsUpdate = true;
         try {
@@ -2295,6 +2372,7 @@ async function doPrivateTranslate() {
     const data = await res.json();
     if (data.ok) {
       $('private-translated-text').value = data.text_en;
+      saveCurrentPrivateQueryToCache();
     }
   } catch (e) {
     toast('Dịch thất bại: ' + e.message, 'error');
@@ -2389,6 +2467,7 @@ async function doPrivateSearch() {
     state.privateSelected = null;
     renderPrivateCandidates();
     $('private-results-count').textContent = `${data.total} candidates`;
+    saveCurrentPrivateQueryToCache();
     toast(`Tìm được ${data.total} kết quả (Riêng)`, 'success');
   } catch (e) {
     $('private-candidates-grid').innerHTML = `<div class="empty-state"><p style="color:var(--red)">❌ ${e.message}</p></div>`;
@@ -2874,6 +2953,7 @@ function saveCurrentPrivateQueryToCache() {
   if (!queryId) return;
 
   state.privateQueryCache[queryId] = {
+    text_vi: $('private-query-input')?.value || '',
     translatedText: $('private-translated-text')?.value || '',
     candidates: state.privateCandidates || [],
     selected: state.privateSelected,
@@ -2887,8 +2967,12 @@ function saveCurrentPrivateQueryToCache() {
 function loadPrivateQueryFromCache(queryId, form) {
   const cached = state.privateQueryCache[queryId];
   if (cached) {
-    $('private-translated-text').value = cached.translatedText || form.translatedText || '';
+    if (cached.text_vi && $('private-query-input')) {
+      $('private-query-input').value = cached.text_vi;
+    }
+    $('private-translated-text').value = cached.translatedText || (form && form.translatedText) || '';
     state.privateCandidates = cached.candidates || [];
+    state.privateSelected = (cached.selected !== undefined && cached.selected !== null) ? cached.selected : null;
     state.privateCandidateDraftFrames = Object.assign({}, cached.candidateDraftFrames);
     state.privateCurrentFps = cached.currentFps;
     state.privateCurrentPlaybackFrame = cached.currentPlaybackFrame;
@@ -2896,11 +2980,11 @@ function loadPrivateQueryFromCache(queryId, form) {
     renderPrivateCandidates();
     $('private-results-count').textContent = `${state.privateCandidates.length} candidates`;
     
-    if (cached.selected !== null && cached.selected < state.privateCandidates.length) {
-      selectPrivateCandidate(cached.selected);
+    if (state.privateSelected !== null && state.privateSelected < state.privateCandidates.length) {
+      selectPrivateCandidate(state.privateSelected);
     }
   } else {
-    $('private-translated-text').value = form.translatedText || '';
+    $('private-translated-text').value = (form && form.translatedText) || '';
     renderPrivateCandidates();
     $('private-results-count').textContent = '0 candidates';
   }

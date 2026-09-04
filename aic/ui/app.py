@@ -17,9 +17,11 @@ API:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -354,6 +356,7 @@ load_shared_state()
 class ConnectionManager:
     def __init__(self):
         self.active_connections: list[WebSocket] = []
+        self.pending_clear: Optional[dict] = None
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
@@ -362,6 +365,34 @@ class ConnectionManager:
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
+        if self.pending_clear:
+            if self.pending_clear.get("requester") == websocket:
+                self.pending_clear = None
+                try:
+                    asyncio.create_task(self.broadcast({"type": "clear_cache_dismiss"}))
+                except Exception:
+                    pass
+            elif websocket in self.pending_clear.get("pending_others", set()):
+                self.pending_clear["pending_others"].discard(websocket)
+                remaining = [
+                    ws for ws in self.pending_clear["pending_others"]
+                    if ws in self.active_connections
+                ]
+                if not remaining:
+                    requester = self.pending_clear.get("requester")
+                    self.pending_clear = None
+                    if requester in self.active_connections:
+                        try:
+                            asyncio.create_task(requester.send_json({
+                                "type": "clear_cache_rejected",
+                                "reason": "Tất cả các máy khác đã ngắt kết nối.",
+                            }))
+                        except Exception:
+                            pass
+                    try:
+                        asyncio.create_task(self.broadcast({"type": "clear_cache_dismiss"}))
+                    except Exception:
+                        pass
 
     async def broadcast(self, message: dict, sender: Optional[WebSocket] = None):
         for connection in list(self.active_connections):
@@ -378,10 +409,22 @@ def validate_ws_update(data: Any) -> tuple[bool, str]:
     if not isinstance(data, dict):
         return False, "Payload phải là dictionary/JSON object"
     msg_type = data.get("type")
-    if msg_type not in ("update", "delete_query", "clear_all"):
+    if msg_type not in (
+        "update",
+        "delete_query",
+        "clear_all",
+        "request_clear_cache",
+        "clear_cache_response",
+        "clear_cache_cancel",
+    ):
         return False, f"Loại message không hợp lệ: {msg_type}"
 
-    if msg_type == "clear_all":
+    if msg_type in ("clear_all", "request_clear_cache", "clear_cache_cancel"):
+        return True, ""
+
+    if msg_type == "clear_cache_response":
+        if not data.get("request_id"):
+            return False, "Thiếu request_id trong clear_cache_response"
         return True, ""
 
     if msg_type == "delete_query":
@@ -535,12 +578,101 @@ async def websocket_endpoint(websocket: WebSocket):
             if data.get("type") == "clear_all":
                 clear_shared_state()
                 save_shared_state()
+                manager.pending_clear = None
                 await manager.broadcast({
                     "type": "clear_all",
                     "manifest": shared_manifest,
                     "selections": shared_selections,
                     "queryCache": shared_query_cache,
                 })
+                continue
+
+            if data.get("type") == "request_clear_cache":
+                active_others = [ws for ws in list(manager.active_connections) if ws != websocket]
+                if not active_others:
+                    # Chỉ có 1 máy đang hoạt động -> thực hiện xóa ngay không cần hỏi ai khác
+                    clear_shared_state()
+                    save_shared_state()
+                    manager.pending_clear = None
+                    await manager.broadcast({
+                        "type": "clear_all",
+                        "manifest": shared_manifest,
+                        "selections": shared_selections,
+                        "queryCache": shared_query_cache,
+                    })
+                else:
+                    # Có nhiều hơn 1 máy -> tạo phiên yêu cầu xóa và hỏi ý kiến các máy còn lại
+                    req_id = uuid.uuid4().hex[:8]
+                    manager.pending_clear = {
+                        "req_id": req_id,
+                        "requester": websocket,
+                        "pending_others": set(active_others),
+                        "rejections": set(),
+                    }
+                    try:
+                        await websocket.send_json({
+                            "type": "clear_cache_waiting",
+                            "request_id": req_id,
+                            "count": len(active_others),
+                        })
+                    except Exception:
+                        pass
+                    for other_ws in active_others:
+                        try:
+                            await other_ws.send_json({
+                                "type": "clear_cache_prompt",
+                                "request_id": req_id,
+                            })
+                        except Exception:
+                            pass
+                continue
+
+            if data.get("type") == "clear_cache_response":
+                req_id = data.get("request_id")
+                approve = bool(data.get("approve"))
+                if not manager.pending_clear or manager.pending_clear.get("req_id") != req_id:
+                    continue
+
+                if approve:
+                    # Được chấp thuận từ ít nhất 1 máy khác -> có thể xóa ngay!
+                    manager.pending_clear = None
+                    clear_shared_state()
+                    save_shared_state()
+                    await manager.broadcast({
+                        "type": "clear_all",
+                        "manifest": shared_manifest,
+                        "selections": shared_selections,
+                        "queryCache": shared_query_cache,
+                    })
+                else:
+                    # Máy này từ chối
+                    manager.pending_clear["rejections"].add(websocket)
+                    manager.pending_clear["pending_others"].discard(websocket)
+
+                    remaining = [
+                        ws for ws in manager.pending_clear["pending_others"]
+                        if ws in manager.active_connections
+                    ]
+                    if not remaining:
+                        # Toàn bộ người dùng khác không 1 ai chấp nhận -> không được xóa!
+                        requester = manager.pending_clear.get("requester")
+                        manager.pending_clear = None
+                        if requester in manager.active_connections:
+                            try:
+                                await requester.send_json({
+                                    "type": "clear_cache_rejected",
+                                    "reason": "Tất cả các thành viên khác đều đã từ chối yêu cầu xóa cache.",
+                                })
+                            except Exception:
+                                pass
+                        await manager.broadcast({"type": "clear_cache_dismiss"})
+                continue
+
+            if data.get("type") == "clear_cache_cancel":
+                req_id = data.get("request_id")
+                if manager.pending_clear and (not req_id or manager.pending_clear.get("req_id") == req_id):
+                    manager.pending_clear = None
+                    await manager.broadcast({"type": "clear_cache_dismiss"})
                 continue
 
             if data.get("type") == "delete_query":

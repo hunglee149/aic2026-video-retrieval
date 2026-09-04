@@ -782,6 +782,15 @@ test('clearAllCache wipes state, selections, cache, and calls reset', async () =
 
   await vm.runInContext('clearAllCache()', context);
 
+  // When WS is active, clearAllCache requests clear cache from server
+  const sent = vm.runInContext('ws.sent', context);
+  assert.ok(sent.length > 0);
+  const parsed = JSON.parse(sent[sent.length - 1]);
+  assert.equal(parsed.type, 'request_clear_cache');
+
+  // When server responds with clear_all, client wipes state
+  vm.runInContext('ws.onmessage({ data: JSON.stringify({ type: "clear_all" }) })', context);
+
   const manifest = stateJson(context, 'state.manifest');
   assert.equal(manifest.length, 0);
 
@@ -792,10 +801,63 @@ test('clearAllCache wipes state, selections, cache, and calls reset', async () =
   assert.deepEqual(queryCache, {});
 
   assert.equal(vm.runInContext('state.currentQueryId', context), null);
+});
+
+test('clear_cache_prompt displays prompt modal and respondClearCache sends approval', () => {
+  const { context, document } = createMainHarness();
+  vm.runInContext('connectWs()', context);
+
+  // Receive clear_cache_prompt from server
+  vm.runInContext('ws.onmessage({ data: JSON.stringify({ type: "clear_cache_prompt", request_id: "req123" }) })', context);
+
+  const promptModal = document.getElementById('modal-clear-prompt');
+  const overlay = document.getElementById('clear-cache-overlay');
+  if (promptModal && overlay) {
+    assert.equal(promptModal.style.display, 'block');
+    assert.equal(overlay.style.display, 'flex');
+  }
+
+  // Respond with approval
+  vm.runInContext('respondClearCache(true)', context);
   const sent = vm.runInContext('ws.sent', context);
-  assert.ok(sent.length > 0);
   const parsed = JSON.parse(sent[sent.length - 1]);
-  assert.equal(parsed.type, 'clear_all');
+  assert.equal(parsed.type, 'clear_cache_response');
+  assert.equal(parsed.request_id, 'req123');
+  assert.equal(parsed.approve, true);
+});
+
+test('switching queries preserves search candidates and translated text', () => {
+  const { context, document } = createMainHarness();
+  setState(context, 'manifest', [
+    { query_id: 'q1', task: 'kis', text: '4 nguoi phi cong' },
+    { query_id: 'q2', task: 'kis', text: 'may bay truc thang' }
+  ]);
+
+  // Select q1
+  vm.runInContext('selectManifestQuery("q1")', context);
+
+  // Set translation and candidates on q1
+  const transInput = document.getElementById('translated-text');
+  transInput.value = 'Four pilots.';
+  setState(context, 'candidates', [
+    { video_id: 'L21_V024', rank: 1, start_frame: 100, end_frame: 200, representative_frames: [150], best_score: 0.8164 }
+  ]);
+  vm.runInContext('saveCurrentQueryToCache()', context);
+
+  // Switch to q2
+  vm.runInContext('selectManifestQuery("q2")', context);
+  assert.equal(vm.runInContext('state.currentQueryId', context), 'q2');
+  assert.equal(transInput.value, '');
+  assert.equal(stateJson(context, 'state.candidates').length, 0);
+
+  // Switch back to q1
+  vm.runInContext('selectManifestQuery("q1")', context);
+  assert.equal(vm.runInContext('state.currentQueryId', context), 'q1');
+  assert.equal(transInput.value, 'Four pilots.');
+
+  const q1Candidates = stateJson(context, 'state.candidates');
+  assert.equal(q1Candidates.length, 1);
+  assert.equal(q1Candidates[0].video_id, 'L21_V024');
 });
 
 test('resetClientStateAndUI wipes all state when triggered by remote clear_all', () => {
@@ -817,5 +879,6 @@ test('resetClientStateAndUI wipes all state when triggered by remote clear_all',
   assert.equal(selections.length, 0);
   assert.equal(vm.runInContext('state.currentQueryId', context), null);
 });
+
 
 
