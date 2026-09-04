@@ -121,6 +121,56 @@ body {
   0%,100% { opacity:1; } 50% { opacity:0.5; }
 }
 
+/* Trạng thái từng thành phần: dịch / CLIP / BM25 / SigLIP.
+   Mỗi thành phần nạp độc lập nên phải nhìn thấy được cái nào đang nạp, cái nào
+   hỏng — trước đây chỉ có một chấm xanh chung không nói lên điều gì. */
+.component-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 10px;
+}
+.component-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 99px;
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: default;
+  transition: var(--transition);
+}
+.component-chip .chip-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+}
+.component-chip.state-idle { opacity: 0.55; }
+.component-chip.state-disabled { opacity: 0.35; }
+.component-chip.state-loading {
+  border-color: rgba(245,158,11,0.45);
+  color: var(--amber, #f59e0b);
+}
+.component-chip.state-loading .chip-dot {
+  background: var(--amber, #f59e0b);
+  animation: pulse 1s infinite;
+}
+.component-chip.state-ready {
+  border-color: rgba(34,197,94,0.4);
+  color: var(--green);
+}
+.component-chip.state-ready .chip-dot { background: var(--green); }
+.component-chip.state-error {
+  border-color: rgba(239,68,68,0.45);
+  color: var(--red);
+  cursor: pointer;
+}
+.component-chip.state-error .chip-dot { background: var(--red); }
+
 /* Nav tabs */
 .nav-tabs {
   display: flex;
