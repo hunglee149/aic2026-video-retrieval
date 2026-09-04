@@ -1329,6 +1329,13 @@ def search(req: SearchRequest):
 
     # Dịch local và trích xuất object theo rule nếu UI chưa cung cấp text_en.
     query = process_query(query)
+    logger.info(
+        "Search query [%s]: text_en='%s', expanded_vi=%s, objects=%s",
+        query.query_id,
+        query.text_en,
+        query.expanded_vi,
+        query.objects,
+    )
 
     exclude = frozenset(req.exclude)
 
@@ -1348,6 +1355,7 @@ def search(req: SearchRequest):
     return {
         "ok": True,
         "total": len(candidates),
+        "text_en": query.text_en,
         "candidates": [_candidate_to_out(c, i + 1) for i, c in enumerate(candidates)],
     }
 

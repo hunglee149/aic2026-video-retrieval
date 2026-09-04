@@ -911,6 +911,10 @@ async function doSearch() {
     const data = await res.json();
     if (!data.ok) throw new Error(data.detail || 'Search failed');
 
+    if (data.text_en && !$('translated-text').value.trim()) {
+      $('translated-text').value = data.text_en;
+    }
+
     state.candidates = data.candidates;
     state.selected = null;
     renderCandidates();

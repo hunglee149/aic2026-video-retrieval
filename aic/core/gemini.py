@@ -25,14 +25,40 @@ DEFAULT_TIMEOUT = 8.0
 GEMINI_API_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 
+def _read_key_from_env_file(key_name: str) -> str:
+    from pathlib import Path
+    env_file = Path(".env")
+    if env_file.exists():
+        try:
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    if k.strip() == key_name:
+                        return v.strip().strip("'\"")
+        except Exception:
+            pass
+    return ""
+
+
 def get_gemini_api_key() -> str:
-    """Lấy API key từ biến môi trường GEMINI_API_KEY hoặc GOOGLE_API_KEY."""
-    return os.environ.get("GEMINI_API_KEY", "").strip() or os.environ.get("GOOGLE_API_KEY", "").strip()
+    """Lấy API key từ biến môi trường GEMINI_API_KEY hoặc GOOGLE_API_KEY, fallback đọc file .env."""
+    key = os.environ.get("GEMINI_API_KEY", "").strip() or os.environ.get("GOOGLE_API_KEY", "").strip()
+    if not key and not os.environ.get("PYTEST_CURRENT_TEST"):
+        key = _read_key_from_env_file("GEMINI_API_KEY") or _read_key_from_env_file("GOOGLE_API_KEY")
+        if key:
+            os.environ["GEMINI_API_KEY"] = key
+    return key
 
 
 def get_gemini_model() -> str:
-    """Lấy tên model phiên bản mới nhất từ biến môi trường, mặc định gemini-2.5-flash."""
-    return os.environ.get("GEMINI_MODEL", "").strip() or DEFAULT_GEMINI_MODEL
+    """Lấy tên model phiên bản mới nhất từ biến môi trường, mặc định gemini-3.6-flash."""
+    model = os.environ.get("GEMINI_MODEL", "").strip()
+    if not model and not os.environ.get("PYTEST_CURRENT_TEST"):
+        model = _read_key_from_env_file("GEMINI_MODEL")
+        if model:
+            os.environ["GEMINI_MODEL"] = model
+    return model or DEFAULT_GEMINI_MODEL
 
 
 def is_gemini_available() -> bool:
