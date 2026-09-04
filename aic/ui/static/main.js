@@ -1641,6 +1641,10 @@ function showExportReview(queryId) {
   
   const card = $('export-review-card');
   card.style.display = 'block';
+  const dlBtn = $('btn-review-download');
+  if (dlBtn) {
+    dlBtn.onclick = () => downloadSingleQueryCsv(queryId);
+  }
   
   if (q.task === 'kis') {
     const html = querySelections.map((s, idx) => `
@@ -1705,6 +1709,41 @@ function showExportReview(queryId) {
   }
   
   card.scrollIntoView({ behavior: 'smooth' });
+}
+
+function downloadSingleQueryCsv(queryId) {
+  const selections = (state.selections || []).filter(s => (s.queryId || s.query_id) === queryId);
+  if (!selections.length) {
+    toast(`Query "${queryId}" chưa có lựa chọn nào để tải xuống!`, 'warning');
+    return;
+  }
+
+  const lines = [];
+  selections.forEach(s => {
+    const vid = (s.video_id || '').replace(/\.mp4$/, '');
+    const frames = Array.isArray(s.frames) ? s.frames : [];
+    const parts = [vid, ...frames.map(String)];
+    if (s.task === 'qa' || s.answer) {
+      let ans = String(s.answer ?? '');
+      if (ans.includes(',') || ans.includes('"') || ans.includes('\n')) {
+        ans = `"${ans.replace(/"/g, '""')}"`;
+      }
+      parts.push(ans);
+    }
+    lines.push(parts.join(','));
+  });
+
+  const csvContent = lines.join('\n') + '\n';
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${queryId}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  toast(`Đã tải xuống ${queryId}.csv`, 'success');
 }
 
 function renderExportTable() {
@@ -1784,6 +1823,7 @@ function renderExportTable() {
     const actions = document.createElement('div');
     actions.style.display = 'flex';
     actions.style.gap = '6px';
+    
     const reviewButton = document.createElement('button');
     reviewButton.type = 'button';
     reviewButton.className = 'btn-translate';
@@ -1791,6 +1831,25 @@ function renderExportTable() {
     reviewButton.style.fontSize = '11px';
     reviewButton.textContent = 'Xem';
     reviewButton.addEventListener('click', () => showExportReview(q.queryId));
+
+    const downloadButton = document.createElement('button');
+    downloadButton.type = 'button';
+    downloadButton.className = 'btn-translate';
+    downloadButton.style.padding = '2px 8px';
+    downloadButton.style.fontSize = '11px';
+    downloadButton.style.color = 'var(--cyan)';
+    downloadButton.style.borderColor = 'rgba(6,182,212,0.3)';
+    downloadButton.style.background = 'rgba(6,182,212,0.1)';
+    downloadButton.textContent = 'Tải file';
+    downloadButton.title = `Tải file ${q.queryId}.csv`;
+    if (!q.selections.length) {
+      downloadButton.disabled = true;
+      downloadButton.style.opacity = '0.4';
+      downloadButton.style.cursor = 'not-allowed';
+    } else {
+      downloadButton.addEventListener('click', () => downloadSingleQueryCsv(q.queryId));
+    }
+
     const removeButton = document.createElement('button');
     removeButton.type = 'button';
     removeButton.className = 'btn-translate';
@@ -1801,7 +1860,8 @@ function renderExportTable() {
     removeButton.style.background = 'rgba(239,68,68,0.1)';
     removeButton.textContent = 'Xoá';
     removeButton.addEventListener('click', () => removeQuerySelections(q.queryId));
-    actions.append(reviewButton, removeButton);
+
+    actions.append(reviewButton, downloadButton, removeButton);
     actionCell.appendChild(actions);
 
     row.append(queryCell, taskCell, detailsCell, statusCell, actionCell);

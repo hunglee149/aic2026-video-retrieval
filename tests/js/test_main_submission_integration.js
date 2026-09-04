@@ -515,7 +515,7 @@ test('uploaded query IDs render as inert text with programmatic action listeners
   assert.match(document.getElementById('query-manifest-list').textContent, new RegExp(hostile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(document.getElementById('export-tbody').textContent, new RegExp(hostile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   const actionButtons = document.getElementById('export-tbody').querySelectorAll('button');
-  assert.equal(actionButtons.length, 2);
+  assert.equal(actionButtons.length, 3);
   assert.equal(actionButtons.every((button) => button.getAttribute('onclick') === null), true);
   assert.equal(context.pwned, undefined);
 });
@@ -878,6 +878,29 @@ test('resetClientStateAndUI wipes all state when triggered by remote clear_all',
   const selections = stateJson(context, 'state.selections');
   assert.equal(selections.length, 0);
   assert.equal(vm.runInContext('state.currentQueryId', context), null);
+});
+
+test('downloadSingleQueryCsv triggers download of formatted CSV file', () => {
+  const { context, document } = createMainHarness();
+  setState(context, 'selections', [
+    { queryId: 'q1', task: 'kis', video_id: 'L01_V001.mp4', frames: [150], answer: '' },
+    { queryId: 'q2', task: 'qa', video_id: 'L01_V002.mp4', frames: [250], answer: 'red car' }
+  ]);
+
+  let downloadedFile = null;
+  const origAppend = document.body.appendChild.bind(document.body);
+  document.body.appendChild = (el) => {
+    if (el.download) {
+      downloadedFile = el.download;
+    }
+    return origAppend(el);
+  };
+
+  vm.runInContext('downloadSingleQueryCsv("q1")', context);
+  assert.equal(downloadedFile, 'q1.csv');
+
+  vm.runInContext('downloadSingleQueryCsv("q2")', context);
+  assert.equal(downloadedFile, 'q2.csv');
 });
 
 
