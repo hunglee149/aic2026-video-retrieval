@@ -109,33 +109,48 @@ def translate_query(query: Query, translate_fn=None) -> Query:
 
 
 def process_query(query: Query, llm_fn=None) -> Query:
-    """Dịch local và trích xuất object; ``llm_fn`` có thể thêm từ đồng nghĩa.
+    """Dịch và trích xuất object/từ đồng nghĩa; tự động dùng Gemini khi có API Key.
 
     Điền đầy đủ:
     - query.text_en: Dịch chuẩn cho CLIP/SigLIP
-    - query.expanded_vi / query.expanded_en: Từ đồng nghĩa khi ``llm_fn`` cung cấp
+    - query.expanded_vi / query.expanded_en: Từ đồng nghĩa khi LLM/Gemini cung cấp
     - query.objects: Danh sách Object detection entities cho ObjectFilter
     """
-    if llm_fn is None:
-        translate_query(query)
-        _rule_based_extract(query)
-        return query
+    # 1. Nếu caller truyền custom llm_fn tường minh (ví dụ trong unit tests)
+    if llm_fn is not None:
+        try:
+            res = llm_fn(query.text_vi)
+            if isinstance(res, dict):
+                if not query.text_en:
+                    query.text_en = res.get("text_en", "")
+                query.expanded_vi = res.get("expanded_vi", [])
+                query.expanded_en = res.get("expanded_en", [])
+                query.objects = res.get("objects", [])
+                logger.info("Processed [%s] via custom llm_fn: en='%s', objects=%s",
+                            query.query_id, query.text_en[:50], query.objects)
+                return query
+        except Exception as e:
+            logger.warning("Custom llm_fn failed for %s: %s. Using fallback.", query.query_id, e)
 
+    # 2. Tự động dùng Gemini khi có cấu hình GEMINI_API_KEY
     try:
-        res = llm_fn(query.text_vi)
-        if isinstance(res, dict):
-            if not query.text_en:
-                query.text_en = res.get("text_en", "")
-            query.expanded_vi = res.get("expanded_vi", [])
-            query.expanded_en = res.get("expanded_en", [])
-            query.objects = res.get("objects", [])
-            logger.info("Processed [%s]: en='%s', objects=%s",
-                        query.query_id, query.text_en[:50], query.objects)
-            return query
-    except Exception as e:
-        logger.warning("Full query processing failed for %s: %s. Using fallback.", query.query_id, e)
+        from .gemini import is_gemini_available, expand_query_with_gemini
 
-    # Fallback to standard translation and rule-based extraction
+        if is_gemini_available():
+            res = expand_query_with_gemini(query.text_vi, task=query.task)
+            if isinstance(res, dict):
+                if not query.text_en:
+                    query.text_en = res.get("text_en", "")
+                query.expanded_vi = res.get("expanded_vi", [])
+                query.expanded_en = res.get("expanded_en", [])
+                query.objects = res.get("objects", [])
+                logger.info("Processed [%s] via Gemini: en='%s', objects=%s",
+                            query.query_id, query.text_en[:50], query.objects)
+                return query
+    except Exception as e:
+        logger.warning("Gemini query expansion failed for %s: %s. Using fallback.", query.query_id, e)
+
+    # 3. Fallback: Dịch local bằng opus-mt-vi-en và trích xuất object bằng rule-based
     translate_query(query)
     _rule_based_extract(query)
     return query

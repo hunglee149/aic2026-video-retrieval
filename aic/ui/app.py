@@ -1281,7 +1281,17 @@ def reload_component(name: str):
 
 @app.post("/api/translate")
 def translate(req: TranslateRequest):
-    """Dịch câu hỏi tiếng Việt → tiếng Anh bằng model local."""
+    """Dịch câu hỏi tiếng Việt → tiếng Anh bằng Gemini (nếu có) hoặc model local."""
+    try:
+        from ..core.gemini import is_gemini_available, translate_with_gemini
+
+        if is_gemini_available():
+            text_en = translate_with_gemini(req.text_vi)
+            if text_en:
+                return {"text_en": text_en, "ok": True}
+    except Exception as e:
+        logger.warning("Gemini translation error: %s. Using local fallback.", e)
+
     try:
         text_en = translate_text(req.text_vi)
         return {"text_en": text_en, "ok": True}
