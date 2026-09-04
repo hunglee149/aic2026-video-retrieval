@@ -35,7 +35,8 @@ WORKDIR /app
 # Install CPU-only PyTorch first. This avoids pulling CUDA/NVIDIA runtime wheels
 # that Azure's CPU Consumption profile cannot use.
 RUN python -m pip install --upgrade pip setuptools wheel \
-    && python -m pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
+    && python -m pip install --index-url https://download.pytorch.org/whl/cpu \
+         torch==2.13.0 torchvision==0.28.0
 
 COPY requirements.txt /app/requirements.txt
 RUN python -m pip install -r /app/requirements.txt

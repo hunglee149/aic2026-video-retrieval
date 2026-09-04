@@ -1,11 +1,32 @@
-pytest==8.0.0
-numpy==1.24.0
-faiss-cpu==1.7.4
-open-clip-torch==2.24.0
-transformers==4.40.0
-sentencepiece==0.2.0
-sacremoses==0.1.1
-torch==2.1.0
-fastapi==0.111.0
-uvicorn[standard]==0.29.0
-huggingface_hub==0.20.0
+# Bộ phiên bản gán cứng cho sản phẩm.
+#
+# Đây là đúng bộ mà toàn bộ test đang xanh trên đó — lấy bằng cách đọc phiên bản
+# thực tế đang cài, KHÔNG phải lấy cận dưới của một khoảng `>=`. Pin vào cận dưới
+# tạo ra một bộ chưa ai từng chạy thử.
+#
+# torch/torchvision: PHẢI khớp đúng phiên bản mà Dockerfile và CI cài từ index
+# CPU của PyTorch. Wheel ở đó mang nhãn local `+cpu`, và theo PEP 440 thì
+# `torch==2.13.0` khớp `2.13.0+cpu` nên pip coi là đã thoả, không cài lại.
+# Lệch một chút thôi (ví dụ pin 2.1.0 trong khi index CPU cài 2.14.0) là pip sẽ
+# tải lại từ PyPI kèm 13 gói nvidia-* + triton — phá đúng mục đích image CPU-only
+# và làm hỏng deploy Azure CPU Consumption. Đổi phiên bản ở đây thì phải đổi
+# đồng thời trong Dockerfile và .github/workflows/build-container.yml.
+torch==2.13.0
+torchvision==0.28.0
+
+# numpy 2.5.x KHÔNG có wheel cho Python 3.11 (bản của Docker/CI) — cao nhất là
+# 2.4.x. Pin 2.4.6 vì đó là bản cao nhất chạy được trên CẢ 3.11 lẫn 3.13, nên máy
+# dev và image production dùng đúng một bản. Nếu sau này nâng base image lên 3.13
+# thì mới pin được 2.5.x.
+numpy==2.4.6
+faiss-cpu==1.15.0
+open-clip-torch==3.3.0
+transformers==5.15.1
+sentencepiece==0.2.2
+sacremoses==0.2.0
+huggingface_hub==1.28.0
+
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+
+pytest==9.1.1
