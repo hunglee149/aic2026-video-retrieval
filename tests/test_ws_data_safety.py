@@ -78,3 +78,43 @@ def test_merge_shared_state_empty_does_not_wipe():
     # Selection for q1 must NOT be wiped by an empty incoming array
     assert len(app_module.shared_selections) == 1
     assert app_module.shared_selections[0]["video_id"] == "V001"
+
+
+def test_validate_ws_delete_query():
+    # Valid delete_query
+    is_valid, msg = validate_ws_update({"type": "delete_query", "query_id": "q1"})
+    assert is_valid is True
+    assert msg == ""
+
+    # Invalid delete_query (missing query_id)
+    is_valid, msg = validate_ws_update({"type": "delete_query"})
+    assert is_valid is False
+    assert "query_id" in msg
+
+    # Invalid delete_query (empty query_id)
+    is_valid, msg = validate_ws_update({"type": "delete_query", "query_id": ""})
+    assert is_valid is False
+
+
+def test_delete_shared_query():
+    app_module.shared_manifest = [
+        {"query_id": "q1", "task": "kis"},
+        {"query_id": "q2", "task": "qa"}
+    ]
+    app_module.shared_selections = [
+        {"queryId": "q1", "video_id": "V1", "frames": [1]},
+        {"queryId": "q2", "video_id": "V2", "frames": [2]}
+    ]
+    app_module.shared_query_cache = {
+        "q1": {"candidates": ["c1"]},
+        "q2": {"candidates": ["c2"]}
+    }
+
+    app_module.delete_shared_query("q1")
+
+    # q1 must be removed completely
+    assert [m["query_id"] for m in app_module.shared_manifest] == ["q2"]
+    assert [s["queryId"] for s in app_module.shared_selections] == ["q2"]
+    assert "q1" not in app_module.shared_query_cache
+    assert "q2" in app_module.shared_query_cache
+

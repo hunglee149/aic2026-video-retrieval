@@ -721,3 +721,39 @@ test('Q&A answer view escapes HTML tags to prevent XSS injection', () => {
   assert.ok(reviewBody.innerHTML.includes('&lt;script&gt;alert(1)&lt;/script&gt;'));
 });
 
+test('deleteQuery removes query from manifest, selections, and cache', () => {
+  const { context, document } = createMainHarness();
+  setState(context, 'manifest', [
+    { query_id: 'q1', task: 'kis', text: 'query 1' },
+    { query_id: 'q2', task: 'qa', text: 'query 2' }
+  ]);
+  setState(context, 'currentQueryId', 'q1');
+  setState(context, 'selections', [
+    { queryId: 'q1', video_id: 'V1', frames: [1] },
+    { queryId: 'q2', video_id: 'V2', frames: [2] }
+  ]);
+  setState(context, 'queryCache', {
+    q1: { candidates: [] },
+    q2: { candidates: [] }
+  });
+
+  context.confirm = () => true;
+
+  vm.runInContext('deleteQuery("q1")', context);
+
+  const manifest = stateJson(context, 'state.manifest');
+  assert.equal(manifest.length, 1);
+  assert.equal(manifest[0].query_id, 'q2');
+
+  const selections = stateJson(context, 'state.selections');
+  assert.equal(selections.length, 1);
+  assert.equal(selections[0].queryId, 'q2');
+
+  const queryCache = stateJson(context, 'state.queryCache');
+  assert.equal(queryCache.q1, undefined);
+  assert.ok(queryCache.q2 !== undefined);
+
+  assert.equal(vm.runInContext('state.currentQueryId', context), 'q2');
+});
+
+

@@ -85,7 +85,12 @@
         </div>
 
         <div class="sidebar-section">
-          <label class="label" for="query-id-input">Query ID</label>
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+            <label class="label" for="query-id-input" style="margin-bottom:0;">Query ID</label>
+            <button id="btn-delete-current-query" type="button" class="btn-translate" onclick="deleteCurrentQuery()" style="color:var(--red); border-color:rgba(239,68,68,0.3); background:rgba(239,68,68,0.08); font-size:11px; padding:2px 8px;" title="Xóa query hiện tại">
+              Xóa query
+            </button>
+          </div>
           <input type="text" id="query-id-input" value="" placeholder="q1"/>
         </div>
 
@@ -255,7 +260,12 @@
         </div>
 
         <div class="sidebar-section">
-          <label class="label" for="private-query-id-input">Query ID</label>
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+            <label class="label" for="private-query-id-input" style="margin-bottom:0;">Query ID</label>
+            <button id="btn-delete-current-private-query" type="button" class="btn-translate" onclick="deleteCurrentPrivateQuery()" style="color:var(--red); border-color:rgba(239,68,68,0.3); background:rgba(239,68,68,0.08); font-size:11px; padding:2px 8px;" title="Xóa query hiện tại">
+              Xóa query
+            </button>
+          </div>
           <input type="text" id="private-query-id-input" value="" placeholder="q1"/>
         </div>
 

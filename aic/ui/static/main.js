@@ -251,15 +251,125 @@ function renderManifestList() {
     const task = document.createElement('span');
     task.className = 'manifest-task';
     task.textContent = item.task.toUpperCase();
+
+    const deleteBtn = document.createElement('span');
+    deleteBtn.className = 'manifest-delete-btn';
+    deleteBtn.title = `Xóa query ${item.query_id}`;
+    deleteBtn.textContent = '×';
+    deleteBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      deleteQuery(item.query_id);
+    });
+
     const readiness = submissionHelpers.manifestQueryReadiness(item, state.selections);
     const status = document.createElement('span');
     status.className = `manifest-readiness ${readiness.ready ? 'ready' : 'not-ready'}`;
     status.textContent = readiness.ready ? 'Ready' : readiness.label;
     button.dataset.readiness = readiness.codes.join(',') || 'ready';
-    button.append(queryId, task, status);
+    button.append(queryId, deleteBtn, task, status);
     button.addEventListener('click', () => selectManifestQuery(item.query_id));
     list.appendChild(button);
   });
+}
+
+function sendWsDeleteQuery(queryId) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      type: 'delete_query',
+      query_id: queryId
+    }));
+  }
+}
+
+function deleteQuery(queryId) {
+  if (!queryId) return;
+  if (typeof confirm === 'function' && !confirm(`Bạn có chắc chắn muốn xóa query "${queryId}" và toàn bộ kết quả đã chọn?`)) {
+    return;
+  }
+
+  // 1. Xóa khỏi manifest
+  state.manifest = (state.manifest || []).filter(item => item.query_id !== queryId);
+  saveManifest();
+
+  // 2. Xóa các lựa chọn liên quan
+  state.selections = (state.selections || []).filter(s => (s.queryId || s.query_id) !== queryId);
+  saveSelections();
+
+  // 3. Xóa cache của query
+  if (state.queryCache) {
+    delete state.queryCache[queryId];
+    saveQueryCache();
+  }
+
+  // 4. Xóa khỏi private selections & cache nếu có
+  if (state.privateSelections) {
+    state.privateSelections = state.privateSelections.filter(s => (s.queryId || s.query_id) !== queryId);
+    savePrivateSelections();
+  }
+  if (state.privateQueryCache) {
+    delete state.privateQueryCache[queryId];
+    savePrivateQueryCache();
+  }
+
+  // 5. Nếu đang ở query bị xóa, chuyển sang query khác hoặc làm trống workspace
+  if (state.currentQueryId === queryId) {
+    state.currentQueryId = null;
+    state.selected = null;
+    state.candidates = [];
+    clearQueryWorkspace();
+    const qi = $('query-input'); if (qi) qi.value = '';
+    const tt = $('translated-text'); if (tt) tt.value = '';
+    const qii = $('query-id-input'); if (qii) qii.value = '';
+    if (state.manifest.length > 0) {
+      selectManifestQuery(state.manifest[0].query_id);
+    }
+  }
+
+  if (state.currentPrivateQueryId === queryId) {
+    state.currentPrivateQueryId = null;
+    state.privateSelected = null;
+    state.privateCandidates = [];
+    clearPrivateQueryWorkspace();
+    const pqi = $('private-query-input'); if (pqi) pqi.value = '';
+    const ptt = $('private-translated-text'); if (ptt) ptt.value = '';
+    const pqii = $('private-query-id-input'); if (pqii) pqii.value = '';
+    if (state.manifest.length > 0) {
+      selectPrivateManifestQuery(state.manifest[0].query_id);
+    }
+  }
+
+  // 6. Đồng bộ qua WebSocket
+  sendWsDeleteQuery(queryId);
+
+  // 7. Cập nhật giao diện
+  renderManifestList();
+  renderSelectionsList();
+  renderPrivateManifestList();
+  renderPrivateSelectionsList();
+  if ($('view-export') && $('view-export').classList.contains('active')) {
+    renderExportTable();
+  }
+
+  toast(`Đã xóa query ${queryId}`, 'success');
+}
+
+function deleteCurrentQuery() {
+  const qid = (state.currentQueryId || $('query-id-input')?.value || '').trim();
+  if (!qid) {
+    toast('Chưa chọn query nào để xóa', 'warning');
+    return;
+  }
+  deleteQuery(qid);
+}
+
+function deleteCurrentPrivateQuery() {
+  const qid = (state.currentPrivateQueryId || $('private-query-id-input')?.value || '').trim();
+  if (!qid) {
+    toast('Chưa chọn query nào để xóa', 'warning');
+    return;
+  }
+  deleteQuery(qid);
 }
 
 function clearAllCache() {
@@ -1411,8 +1521,16 @@ function getQuerySummary() {
 }
 
 function removeQuerySelections(queryId) {
+  const hasSelections = (state.selections || []).some(s => s.queryId === queryId);
+  const isInManifest = (state.manifest || []).some(m => m.query_id === queryId);
+
+  if (isInManifest && !hasSelections) {
+    deleteQuery(queryId);
+    return;
+  }
+
   if (confirm(`Bạn có chắc chắn muốn xoá toàn bộ lựa chọn cho query ${queryId}?`)) {
-    state.selections = state.selections.filter(s => s.queryId !== queryId);
+    state.selections = (state.selections || []).filter(s => s.queryId !== queryId);
     saveSelections();
     renderSelectionsList();
     renderManifestList();
@@ -2017,6 +2135,59 @@ function connectWs() {
           }
         } finally {
           isApplyingWsUpdate = false;
+        }
+      } else if (msg.type === 'delete_query') {
+        const deletedQid = msg.query_id;
+        state.manifest = (state.manifest || []).filter(m => m.query_id !== deletedQid);
+        state.selections = (state.selections || []).filter(s => (s.queryId || s.query_id) !== deletedQid);
+        if (state.queryCache) {
+          delete state.queryCache[deletedQid];
+        }
+        if (state.privateSelections) {
+          state.privateSelections = state.privateSelections.filter(s => (s.queryId || s.query_id) !== deletedQid);
+          savePrivateSelections();
+        }
+        if (state.privateQueryCache) {
+          delete state.privateQueryCache[deletedQid];
+          savePrivateQueryCache();
+        }
+
+        saveManifest();
+        saveSelections();
+        saveQueryCache();
+
+        if (state.currentQueryId === deletedQid) {
+          state.currentQueryId = null;
+          state.selected = null;
+          state.candidates = [];
+          clearQueryWorkspace();
+          const qi = $('query-input'); if (qi) qi.value = '';
+          const tt = $('translated-text'); if (tt) tt.value = '';
+          const qii = $('query-id-input'); if (qii) qii.value = '';
+          if (state.manifest.length > 0) {
+            selectManifestQuery(state.manifest[0].query_id);
+          }
+        }
+
+        if (state.currentPrivateQueryId === deletedQid) {
+          state.currentPrivateQueryId = null;
+          state.privateSelected = null;
+          state.privateCandidates = [];
+          clearPrivateQueryWorkspace();
+          const pqi = $('private-query-input'); if (pqi) pqi.value = '';
+          const ptt = $('private-translated-text'); if (ptt) ptt.value = '';
+          const pqii = $('private-query-id-input'); if (pqii) pqii.value = '';
+          if (state.manifest.length > 0) {
+            selectPrivateManifestQuery(state.manifest[0].query_id);
+          }
+        }
+
+        renderManifestList();
+        renderSelectionsList();
+        renderPrivateManifestList();
+        renderPrivateSelectionsList();
+        if ($('view-export') && $('view-export').classList.contains('active')) {
+          renderExportTable();
         }
       }
     } catch (e) {
@@ -2837,13 +3008,23 @@ function renderPrivateManifestList() {
     const task = document.createElement('span');
     task.className = 'manifest-task';
     task.textContent = item.task.toUpperCase();
+
+    const deleteBtn = document.createElement('span');
+    deleteBtn.className = 'manifest-delete-btn';
+    deleteBtn.title = `Xóa query ${item.query_id}`;
+    deleteBtn.textContent = '×';
+    deleteBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      deleteQuery(item.query_id);
+    });
     
     const readiness = submissionHelpers.manifestQueryReadiness(item, state.privateSelections);
     const status = document.createElement('span');
     status.className = `manifest-readiness ${readiness.ready ? 'ready' : 'not-ready'}`;
     status.textContent = readiness.ready ? 'Ready' : readiness.label;
     
-    button.append(queryId, task, status);
+    button.append(queryId, deleteBtn, task, status);
     button.addEventListener('click', () => selectPrivateManifestQuery(item.query_id));
     list.appendChild(button);
   });

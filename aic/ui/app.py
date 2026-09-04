@@ -377,8 +377,15 @@ def validate_ws_update(data: Any) -> tuple[bool, str]:
     """Kiểm tra cấu trúc dữ liệu gửi qua WebSocket."""
     if not isinstance(data, dict):
         return False, "Payload phải là dictionary/JSON object"
-    if data.get("type") != "update":
-        return False, f"Loại message không hợp lệ: {data.get('type')}"
+    msg_type = data.get("type")
+    if msg_type not in ("update", "delete_query"):
+        return False, f"Loại message không hợp lệ: {msg_type}"
+
+    if msg_type == "delete_query":
+        query_id = data.get("query_id")
+        if not query_id or not isinstance(query_id, str):
+            return False, "Thiếu trường 'query_id' hợp lệ trong delete_query"
+        return True, ""
 
     if "manifest" in data:
         if not isinstance(data["manifest"], list):
@@ -402,6 +409,23 @@ def validate_ws_update(data: Any) -> tuple[bool, str]:
         return False, "Trường 'queryCache' phải là dictionary/object"
 
     return True, ""
+
+
+def delete_shared_query(query_id: str) -> None:
+    """Xóa hoàn toàn một query khỏi shared_manifest, shared_selections và shared_query_cache."""
+    global shared_manifest, shared_selections, shared_query_cache
+    if shared_manifest is not None:
+        shared_manifest[:] = [
+            m for m in shared_manifest
+            if isinstance(m, dict) and m.get("query_id") != query_id
+        ]
+    if shared_selections is not None:
+        shared_selections[:] = [
+            s for s in shared_selections
+            if isinstance(s, dict) and (s.get("queryId") or s.get("query_id")) != query_id
+        ]
+    if isinstance(shared_query_cache, dict):
+        shared_query_cache.pop(query_id, None)
 
 
 def merge_shared_state(
@@ -492,6 +516,19 @@ async def websocket_endpoint(websocket: WebSocket):
                     await websocket.send_json({"type": "error", "detail": err_msg})
                 except Exception:
                     pass
+                continue
+
+            if data.get("type") == "delete_query":
+                query_id = data.get("query_id")
+                delete_shared_query(query_id)
+                save_shared_state()
+                await manager.broadcast({
+                    "type": "delete_query",
+                    "query_id": query_id,
+                    "manifest": shared_manifest,
+                    "selections": shared_selections,
+                    "queryCache": shared_query_cache,
+                })
                 continue
 
             merge_shared_state(
